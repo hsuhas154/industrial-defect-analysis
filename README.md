@@ -9,7 +9,7 @@ image processing and handcrafted features, to classical machine learning, to
 CNN-based deep learning, and compares the two families of methods on the same
 data splits.
 
-> **Phase 1: ** This repository currently implements a
+> **Phase 1:** This repository currently implements a
 > working, defensible end-to-end baseline: two parallel pipelines
 > (`HOG → Decision Tree / SVM` and a `custom CNN`), fair evaluation on a shared
 > deterministic split, an inference CLI, and a Streamlit demo. The full
