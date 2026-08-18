@@ -1,0 +1,42 @@
+# --- Datasets (never committed; see data/README.md) ---
+data/raw/
+data/processed/
+*.bmp
+*.tif
+*.tiff
+
+# --- Experiment outputs / model checkpoints ---
+experiments/results/*
+experiments/figures/*
+experiments/logs/*
+!experiments/results/.gitkeep
+!experiments/figures/.gitkeep
+!experiments/logs/.gitkeep
+*.pt
+*.pth
+*.joblib
+*.pkl
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Environments ---
+.venv/
+venv/
+env/
+.env
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

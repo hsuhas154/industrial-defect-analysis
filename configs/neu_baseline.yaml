@@ -1,0 +1,63 @@
+# ============================================================================
+# Phase 1 baseline configuration — NEU Surface Defect Database
+# ============================================================================
+# Every experiment in Phase 1 is driven by this single config file so that runs
+# are reproducible and easy to audit. Override the path with --config on any of
+# the CLI scripts.
+
+seed: 42
+
+data:
+  # Directory that holds the dataset. Two layouts are auto-detected:
+  #   1. Class sub-folders:   <root>/<class_name>/*.bmp
+  #   2. Flat NEU-CLS layout: <root>/Cr_1.bmp, In_1.bmp, ...  (prefix -> class)
+  root: "data/raw/NEU-CLS"
+  image_size: 128          # images are resized to image_size x image_size
+  grayscale: true
+  # Deterministic stratified split (fractions must sum to 1.0)
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+
+preprocessing:
+  normalize: true          # scale pixel intensities to [0, 1]
+  clahe: true              # contrast-limited adaptive histogram equalisation
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: 8
+  denoise: "none"          # one of: none | gaussian | median
+  denoise_ksize: 3
+
+hog:
+  orientations: 9
+  pixels_per_cell: [16, 16]
+  cells_per_block: [2, 2]
+  block_norm: "L2-Hys"
+  transform_sqrt: true
+
+classical_ml:
+  decision_tree:
+    max_depth: 20
+    min_samples_leaf: 2
+    criterion: "gini"
+  svm:
+    kernel: "rbf"
+    C: 10.0
+    gamma: "scale"
+    standardize: true      # StandardScaler before the SVM
+
+cnn:
+  in_channels: 1
+  base_channels: 32        # channel width of the first conv block
+  dropout: 0.3
+  epochs: 20
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  num_workers: 2
+  augment: true            # random flips / small rotations on the train split
+  device: "auto"           # auto | cpu | cuda
+
+output:
+  results_dir: "experiments/results"
+  figures_dir: "experiments/figures"
+  logs_dir: "experiments/logs"

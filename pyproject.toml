@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idefect"
+version = "0.1.0"
+description = "Automated Industrial Surface Defect Analysis — Phase 1 resume prototype (classical CV + HOG + Decision Tree/SVM vs a custom CNN) on the NEU Surface Defect Database."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Suhas" }]
+keywords = [
+    "computer-vision",
+    "surface-defect",
+    "industrial-inspection",
+    "hog",
+    "svm",
+    "cnn",
+    "neu-dataset",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "opencv-python-headless>=4.8",
+    "scikit-image>=0.21",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "tqdm>=4.66",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "streamlit>=1.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+idefect-gen-dummy = "idefect.scripts_entry:gen_dummy_main"
+idefect-train-classical = "idefect.scripts_entry:train_classical_main"
+idefect-train-cnn = "idefect.scripts_entry:train_cnn_main"
+idefect-predict = "idefect.scripts_entry:predict_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
