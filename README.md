@@ -9,12 +9,12 @@ image processing and handcrafted features, to classical machine learning, to
 CNN-based deep learning, and compares the two families of methods on the same
 data splits.
 
-> **Status: Phase 1 — Resume Prototype.** This repository currently implements a
+> **Phase 1: ** This repository currently implements a
 > working, defensible end-to-end baseline: two parallel pipelines
 > (`HOG → Decision Tree / SVM` and a `custom CNN`), fair evaluation on a shared
 > deterministic split, an inference CLI, and a Streamlit demo. The full
 > comparative study (Random Forest, XGBoost, LBP/GLCM, VGG/ResNet/DenseNet/
-> MobileNet, transfer learning, and U-Net localization) is planned — see the
+> MobileNet, transfer learning, and U-Net localization) is planned, see the
 > [Roadmap](#roadmap).
 
 ---
