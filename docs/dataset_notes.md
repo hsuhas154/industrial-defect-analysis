@@ -18,6 +18,14 @@
 | `RS`   | rolled-in_scale  |
 | `Sc`   | scratches        |
 
+### Data quality
+
+* All 1,800 images are readable, 200x200, single-channel 8-bit.
+* Exact duplicate pair: `Pa_101.bmp` and `Pa_105.bmp` (identical pixels). Kept in
+  the same split by the duplicate-aware splitter.
+* Most images show an illumination gradient (darker towards one edge), which is
+  why local contrast normalisation (CLAHE) is part of preprocessing.
+
 ### License / redistribution
 
 The official page does not provide a clear standardized open-source license.
@@ -25,7 +33,7 @@ This repository therefore does not redistribute the raw images; it documents the
 source and provides download + preprocessing instructions instead. Preserve the
 original attribution when using the data.
 
-## Datasets reserved for later phases (not used in Phase 1)
+## Datasets reserved for later phases
 
 | Dataset      | Purpose                        | License          | Link |
 |--------------|--------------------------------|------------------|------|
@@ -34,5 +42,5 @@ original attribution when using the data.
 | MVTec AD     | Optional anomaly benchmark     | CC BY-NC-SA 4.0 (non-commercial) | https://www.mvtec.com/research-teaching/datasets/mvtec-ad |
 
 License references:
-- CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
-- CC BY-NC-SA 4.0 — https://creativecommons.org/licenses/by-nc-sa/4.0/
+- CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+- CC BY-NC-SA 4.0: https://creativecommons.org/licenses/by-nc-sa/4.0/
