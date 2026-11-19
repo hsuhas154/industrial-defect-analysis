@@ -58,7 +58,7 @@ def preprocess_image(
 
     Returns a float32 array of shape (image_size, image_size). If
     ``cfg.normalize`` is True the output is scaled to [0, 1]; otherwise it is a
-    float copy of the 0–255 image.
+    float copy of the 0-255 image.
     """
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)

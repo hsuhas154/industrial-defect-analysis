@@ -12,6 +12,8 @@ from typing import Dict, List, Sequence
 import matplotlib
 
 matplotlib.use("Agg")
+# Render negative tick labels with an ASCII hyphen rather than a Unicode minus.
+matplotlib.rcParams["axes.unicode_minus"] = False
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -33,7 +35,7 @@ def plot_confusion_matrix(
     cm = np.asarray(cm, dtype=float)
     if normalize:
         row_sums = cm.sum(axis=1, keepdims=True)
-        cm = np.divide(cm, row_sums, where=row_sums != 0)
+        cm = np.divide(cm, row_sums, out=np.zeros_like(cm), where=row_sums != 0)
 
     fig, ax = plt.subplots(figsize=(6.5, 5.5))
     im = ax.imshow(cm, cmap="Blues")
@@ -86,7 +88,9 @@ def plot_training_curves(history: Dict[str, List[float]], out_path: str | Path) 
 
     ax2.plot(epochs, history["train_acc"], label="train")
     ax2.plot(epochs, history["val_acc"], label="val")
-    ax2.set(xlabel="epoch", ylabel="accuracy", title="Accuracy")
+    if "val_macro_f1" in history:
+        ax2.plot(epochs, history["val_macro_f1"], "--", label="val macro-F1")
+    ax2.set(xlabel="epoch", ylabel="score", title="Accuracy / macro-F1")
     ax2.legend()
     ax2.grid(alpha=0.3)
 

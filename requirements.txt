@@ -1,12 +1,12 @@
-# Phase 1 dependencies for the Industrial Surface Defect Analysis prototype.
+# Dependencies for the Industrial Surface Defect Analysis project.
 # Pinned with lower bounds; tested on Python 3.10 / 3.11 under Linux / WSL 2.
 #
-# NOTE on the RTX 5070 (Blackwell) GPU:
-#   The default `torch` wheel below installs a CUDA build that works on most
-#   GPUs. If `torch.cuda.is_available()` returns False on your machine, install
-#   a CUDA build that matches your driver, e.g.:
+# NOTE on newer NVIDIA GPUs (for example the RTX 50 series):
+#   The default `torch` wheel below works on most GPUs. If
+#   `torch.cuda.is_available()` returns False, install a CUDA build that matches
+#   your driver, e.g.:
 #       pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-#   The Phase 1 custom CNN is small enough to also train comfortably on CPU.
+#   The custom CNN is small enough to also train comfortably on a CPU.
 
 numpy>=1.24
 scipy>=1.10
@@ -21,7 +21,10 @@ pillow>=10.0
 tqdm>=4.66
 torch>=2.2
 torchvision>=0.17
-streamlit>=1.30
+streamlit>=1.50
 
-# Testing (optional, install with: pip install -r requirements.txt pytest)
+# Testing
 pytest>=7.4
+
+# Notebooks (optional)
+# jupyterlab>=4.0

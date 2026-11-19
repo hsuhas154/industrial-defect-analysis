@@ -1,4 +1,4 @@
-"""idefect — Industrial Surface Defect Analysis (Phase 1 prototype).
+"""idefect: Industrial Surface Defect Analysis.
 
 A modular, reproducible prototype that compares a classical computer-vision
 pipeline (preprocessing + HOG features + Decision Tree / SVM) against a small

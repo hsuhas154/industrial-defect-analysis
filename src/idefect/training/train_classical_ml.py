@@ -17,13 +17,15 @@ import numpy as np
 
 from idefect.classical_ml import build_decision_tree, build_svm
 from idefect.config import Config
-from idefect.data.datasets import load_samples, load_split_arrays, make_splits
+from idefect.data.datasets import build_split, load_split_arrays
 from idefect.evaluation.classification import (
     compute_metrics,
     format_report,
     save_metrics,
+    save_predictions,
     summarize,
 )
+from idefect.experiment_log import config_hash, environment_info, log_run
 from idefect.features.hog import extract_hog_batch, hog_visualization
 from idefect.seed import set_seed
 from idefect.visualization.plots import plot_confusion_matrix, plot_hog
@@ -42,22 +44,16 @@ def _save_bundle(model, kind: str, cfg: Config, class_names, path: Path) -> None
     joblib.dump(bundle, path)
 
 
-def train_classical_ml(cfg: Config) -> Dict[str, Dict]:
+def train_classical_ml(cfg: Config, config_path: str = "") -> Dict[str, Dict]:
     """Train Decision Tree and SVM baselines. Returns a dict of test metrics."""
     set_seed(cfg.seed)
     results_dir = Path(cfg.output.results_dir)
     figures_dir = Path(cfg.output.figures_dir)
 
     print(f"[data] scanning {cfg.data.root}")
-    samples, class_names = load_samples(cfg.data.root)
-    split = make_splits(
-        samples,
-        class_names,
-        cfg.data.train_frac,
-        cfg.data.val_frac,
-        cfg.data.test_frac,
-        cfg.seed,
-    )
+    _, class_names, split, dup_groups = build_split(cfg)
+    if dup_groups:
+        print(f"[data] {len(dup_groups)} exact-duplicate group(s) kept within one split")
     print(f"[data] {split.summary()}")
 
     print("[preprocess] loading + preprocessing images ...")
@@ -90,22 +86,36 @@ def train_classical_ml(cfg: Config) -> Dict[str, Dict]:
         model.fit(H_train, y_train)
         fit_time = time.time() - t0
 
+        t1 = time.time()
         y_pred = model.predict(H_test)
-        metrics = compute_metrics(y_test, y_pred, class_names)
-        metrics["fit_time_sec"] = round(fit_time, 3)
-        metrics["feature_dim"] = int(H_train.shape[1])
+        infer_time = time.time() - t1
+        y_proba = model.predict_proba(H_test) if hasattr(model, "predict_proba") else None
+        metrics = compute_metrics(y_test, y_pred, class_names, y_proba=y_proba)
+        metrics.update(
+            model=kind,
+            fit_time_sec=round(fit_time, 3),
+            test_inference_sec=round(infer_time, 4),
+            feature_dim=int(H_train.shape[1]),
+            config_hash=config_hash(cfg),
+            environment=environment_info(),
+        )
         all_metrics[kind] = metrics
 
         print(f"[eval:{kind}] {summarize(metrics)}")
         print(format_report(y_test, y_pred, class_names))
 
         save_metrics(metrics, results_dir / f"{kind}_metrics.json")
+        save_predictions(
+            results_dir / f"{kind}_test_predictions.csv",
+            [p for p, _ in split.test], y_test, y_pred, class_names, y_proba,
+        )
+        log_run(cfg.output.logs_dir, kind, cfg, metrics, config_path=config_path)
         _save_bundle(model, kind, cfg, class_names, results_dir / f"{kind}.joblib")
         plot_confusion_matrix(
             metrics["confusion_matrix"],
             class_names,
             figures_dir / f"{kind}_confusion_matrix.png",
-            title=f"{kind} — confusion matrix",
+            title=f"{kind} confusion matrix",
         )
 
     return all_metrics

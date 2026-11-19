@@ -23,6 +23,7 @@ class DataConfig:
     train_frac: float = 0.70
     val_frac: float = 0.15
     test_frac: float = 0.15
+    group_duplicates: bool = True  # keep exact-duplicate images in the same split
 
 
 @dataclass
@@ -77,6 +78,10 @@ class CNNConfig:
     num_workers: int = 2
     augment: bool = True
     device: str = "auto"  # auto | cpu | cuda
+    scheduler: str = "cosine"  # cosine | plateau | none
+    select_metric: str = "macro_f1"  # macro_f1 | accuracy | loss (checkpoint selection)
+    early_stopping_patience: int = 0  # epochs without improvement; 0 disables
+    cache_images: bool = True  # keep preprocessed images in memory
 
 
 @dataclass
@@ -147,3 +152,9 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "preprocessing.denoise must be one of none|gaussian|median"
         )
+    if cfg.cnn.scheduler not in {"cosine", "plateau", "none"}:
+        raise ValueError("cnn.scheduler must be one of cosine|plateau|none")
+    if cfg.cnn.select_metric not in {"macro_f1", "accuracy", "loss"}:
+        raise ValueError("cnn.select_metric must be one of macro_f1|accuracy|loss")
+    if cfg.cnn.device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("cnn.device must be one of auto|cpu|cuda")

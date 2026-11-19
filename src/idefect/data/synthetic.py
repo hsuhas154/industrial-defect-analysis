@@ -22,21 +22,21 @@ def _texture_for_class(cls_idx: int, size: int, rng: np.random.Generator) -> np.
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
     base = rng.normal(128, 12, size=(size, size)).astype(np.float32)
 
-    if cls_idx == 0:  # crazing — fine cross-hatch
+    if cls_idx == 0:  # crazing: fine cross-hatch
         pattern = 40 * (np.sin(xx / 2.0) * np.sin(yy / 2.0))
-    elif cls_idx == 1:  # inclusion — random blobs
+    elif cls_idx == 1:  # inclusion: random blobs
         pattern = np.zeros((size, size), np.float32)
         for _ in range(6):
             cx, cy = rng.integers(0, size, 2)
             r = int(rng.integers(4, 12))
             cv2.circle(pattern, (int(cx), int(cy)), r, float(rng.integers(40, 90)), -1)
-    elif cls_idx == 2:  # patches — large soft regions
+    elif cls_idx == 2:  # patches: large soft regions
         pattern = 50 * np.sin((xx + yy) / 20.0)
-    elif cls_idx == 3:  # pitted_surface — speckle
+    elif cls_idx == 3:  # pitted_surface: speckle
         pattern = rng.normal(0, 45, size=(size, size)).astype(np.float32)
-    elif cls_idx == 4:  # rolled-in_scale — horizontal banding
+    elif cls_idx == 4:  # rolled-in_scale: horizontal banding
         pattern = 45 * np.sin(yy / 4.0)
-    else:  # scratches — diagonal streaks
+    else:  # scratches: diagonal streaks
         pattern = np.zeros((size, size), np.float32)
         for _ in range(5):
             x0 = int(rng.integers(0, size))

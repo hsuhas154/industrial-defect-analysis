@@ -1,7 +1,7 @@
 # ============================================================================
-# Phase 1 baseline configuration — NEU Surface Defect Database
+# Baseline configuration for the NEU Surface Defect Database
 # ============================================================================
-# Every experiment in Phase 1 is driven by this single config file so that runs
+# Every baseline experiment is driven by this single config file so that runs
 # are reproducible and easy to audit. Override the path with --config on any of
 # the CLI scripts.
 
@@ -18,6 +18,9 @@ data:
   train_frac: 0.70
   val_frac: 0.15
   test_frac: 0.15
+  # NEU-CLS contains exact duplicates (Pa_101.bmp == Pa_105.bmp). Keeping each
+  # duplicate group inside one split prevents train/test leakage.
+  group_duplicates: true
 
 preprocessing:
   normalize: true          # scale pixel intensities to [0, 1]
@@ -49,13 +52,17 @@ cnn:
   in_channels: 1
   base_channels: 32        # channel width of the first conv block
   dropout: 0.3
-  epochs: 20
+  epochs: 40               # chosen on validation macro-F1 (20 epochs was still improving)
   batch_size: 64
   lr: 0.001
   weight_decay: 0.0001
   num_workers: 2
-  augment: true            # random flips / small rotations on the train split
+  augment: true            # random flips and 90-degree rotations on the train split
   device: "auto"           # auto | cpu | cuda
+  scheduler: "cosine"      # cosine | plateau | none (learning-rate schedule)
+  select_metric: "macro_f1" # checkpoint kept by best validation macro_f1 | accuracy | loss
+  early_stopping_patience: 0  # stop after N epochs without improvement; 0 disables
+  cache_images: true       # preprocess once and keep in memory (about 30 MB for NEU)
 
 output:
   results_dir: "experiments/results"

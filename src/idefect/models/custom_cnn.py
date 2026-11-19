@@ -1,7 +1,7 @@
 """A small custom CNN implemented from scratch in PyTorch.
 
-The network learns a representation directly from pixels — no handcrafted
-feature extraction — which is exactly the contrast Phase 1 is built to show
+The network learns a representation directly from pixels, with no handcrafted
+feature extraction. This is exactly the contrast the project is built to show
 against the HOG + Decision Tree / SVM branch.
 
 Architecture (deliberately small so it trains fast on a laptop GPU or CPU):

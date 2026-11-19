@@ -9,7 +9,9 @@ Two on-disk layouts are supported and auto-detected:
 
 from __future__ import annotations
 
+import hashlib
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -114,6 +116,30 @@ def _class_from_filename(name: str) -> Optional[str]:
     return None
 
 
+def pixel_hash(img: np.ndarray) -> str:
+    """Hash of decoded pixels (not file bytes): the same image re-saved with
+    different metadata still hashes identically."""
+    h = hashlib.md5()
+    h.update(str(img.shape).encode())
+    h.update(np.ascontiguousarray(img).tobytes())
+    return h.hexdigest()
+
+
+def find_duplicate_groups(samples: Sequence[Sample]) -> List[List[str]]:
+    """Groups of image paths whose pixels are exactly identical.
+
+    NEU-CLS itself contains such a pair (Pa_101.bmp and Pa_105.bmp), so this
+    matters in practice: if the copies land in different splits, the test set
+    contains an image the model was trained on.
+    """
+    by_hash: dict[str, List[str]] = defaultdict(list)
+    for path, _ in samples:
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            by_hash[pixel_hash(img)].append(str(path))
+    return [sorted(g) for g in by_hash.values() if len(g) > 1]
+
+
 def make_splits(
     samples: Sequence[Sample],
     class_names: Sequence[str],
@@ -121,16 +147,26 @@ def make_splits(
     val_frac: float,
     test_frac: float,
     seed: int,
+    groups: Optional[Sequence[Sequence[str]]] = None,
 ) -> DatasetSplit:
     """Deterministic **stratified** split.
 
     The split is reproducible for a given ``seed`` and keeps class proportions
-    roughly balanced across train/val/test. Implemented with a per-class shuffle
-    so there is no hard dependency on scikit-learn's splitter here.
+    balanced across train/val/test. Implemented with a per-class shuffle so
+    there is no hard dependency on scikit-learn's splitter here.
+
+    ``groups`` lists paths that must stay together (for example exact
+    duplicates). Each group is placed as one unit, so no group spans two
+    splits. Without groups every image is its own unit.
     """
     total = train_frac + val_frac + test_frac
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"fractions must sum to 1.0, got {total}")
+
+    group_of = {}
+    for gi, g in enumerate(groups or []):
+        for p in g:
+            group_of[str(p)] = gi
 
     rng = random.Random(seed)
     by_class: dict[int, List[Sample]] = {i: [] for i in range(len(class_names))}
@@ -143,16 +179,31 @@ def make_splits(
 
     for label in sorted(by_class):
         items = sorted(by_class[label])  # deterministic base order
-        rng.shuffle(items)
+        units: List[List[Sample]] = []
+        grouped: dict[int, List[Sample]] = {}
+        for item in items:
+            gi = group_of.get(str(item[0]))
+            if gi is None:
+                units.append([item])
+            elif gi in grouped:
+                grouped[gi].append(item)
+            else:
+                grouped[gi] = [item]
+                units.append(grouped[gi])
+        rng.shuffle(units)
         n = len(items)
-        n_train = int(round(n * train_frac))
-        n_val = int(round(n * val_frac))
-        # Guard against rounding overflow.
-        n_train = min(n_train, n)
-        n_val = min(n_val, n - n_train)
-        train.extend(items[:n_train])
-        val.extend(items[n_train : n_train + n_val])
-        test.extend(items[n_train + n_val :])
+        n_train = min(int(round(n * train_frac)), n)
+        n_val = min(int(round(n * val_frac)), n - n_train)
+        got_train = got_val = 0
+        for unit in units:
+            if got_train < n_train:
+                train.extend(unit)
+                got_train += len(unit)
+            elif got_val < n_val:
+                val.extend(unit)
+                got_val += len(unit)
+            else:
+                test.extend(unit)
 
     # Shuffle the concatenated splits so classes are interleaved.
     rng.shuffle(train)
@@ -165,6 +216,23 @@ def make_splits(
         test=test,
         class_names=list(class_names),
     )
+
+
+def build_split(cfg) -> Tuple[List[Sample], List[str], DatasetSplit, List[List[str]]]:
+    """Scan the dataset in ``cfg.data.root`` and build the shared split.
+
+    Every branch (classical, CNN, dataset report) calls this, so all of them
+    see exactly the same train/val/test partition. Returns
+    ``(samples, class_names, split, duplicate_groups)``.
+    """
+    samples, class_names = load_samples(cfg.data.root)
+    dup_groups = find_duplicate_groups(samples) if cfg.data.group_duplicates else []
+    split = make_splits(
+        samples, class_names,
+        cfg.data.train_frac, cfg.data.val_frac, cfg.data.test_frac,
+        cfg.seed, groups=dup_groups,
+    )
+    return samples, class_names, split, dup_groups
 
 
 def load_split_arrays(
@@ -192,16 +260,35 @@ def load_split_arrays(
 # PyTorch dataset (used by the CNN branch). torch is imported lazily so the
 # classical-only path and the unit tests do not require it.
 # ---------------------------------------------------------------------------
-def _augment(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Light on-the-fly augmentation: random flips and a small rotation."""
-    if rng.random() < 0.5:
+def augment_image(img: np.ndarray, flip_lr: bool, flip_ud: bool, k_rot90: int) -> np.ndarray:
+    """Apply a deterministic flip / 90-degree rotation combination.
+
+    NEU defects have no canonical orientation, so horizontal and vertical flips
+    and 0/90/180/270 degree rotations are label-preserving. The random choice of
+    parameters is made by the caller so this function stays pure and testable.
+    """
+    if flip_lr:
         img = np.fliplr(img)
-    if rng.random() < 0.5:
+    if flip_ud:
         img = np.flipud(img)
-    k = int(rng.integers(0, 4))  # 0/90/180/270 deg rotations are label-safe
-    if k:
-        img = np.rot90(img, k)
+    if k_rot90 % 4:
+        img = np.rot90(img, k_rot90 % 4)
     return np.ascontiguousarray(img)
+
+
+def seed_worker(worker_id: int) -> None:
+    """``DataLoader`` ``worker_init_fn`` that seeds NumPy and ``random``.
+
+    PyTorch already gives every worker a distinct torch seed that changes each
+    epoch (derived from the loader's generator). This propagates that seed to
+    NumPy and Python's ``random`` so any library code using them is also
+    reproducible and not duplicated across workers.
+    """
+    import torch
+
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 try:  # pragma: no cover - exercised only when torch is present
@@ -209,7 +296,19 @@ try:  # pragma: no cover - exercised only when torch is present
     import torch
 
     class NEUImageDataset(_TorchDataset):
-        """PyTorch dataset yielding ``(image_tensor, label)`` pairs."""
+        """PyTorch dataset yielding ``(image_tensor, label)`` pairs.
+
+        Augmentation parameters are drawn from torch's RNG inside
+        ``__getitem__``. Inside ``DataLoader`` workers PyTorch reseeds that RNG
+        per worker and per epoch, so every epoch sees fresh augmentations while
+        the whole run stays reproducible for a fixed global seed. (Holding a
+        NumPy generator on the dataset instead would be copied into every
+        worker and replay the identical sequence each epoch.)
+
+        With ``cache=True`` the deterministic preprocessing is done once and
+        kept in memory (about 30 MB for NEU at 128 px), so only augmentation
+        runs per epoch.
+        """
 
         def __init__(
             self,
@@ -217,25 +316,35 @@ try:  # pragma: no cover - exercised only when torch is present
             cfg: PreprocessingConfig,
             image_size: int,
             augment: bool = False,
-            seed: int = 42,
+            cache: bool = False,
         ):
             self.samples = list(samples)
             self.cfg = cfg
             self.image_size = image_size
             self.augment = augment
-            self._rng = np.random.default_rng(seed)
+            self._cache: Optional[List[np.ndarray]] = None
+            if cache:
+                self._cache = [self._load(i) for i in range(len(self.samples))]
+
+        def _load(self, idx: int) -> np.ndarray:
+            path, _ = self.samples[idx]
+            return preprocess_image(load_grayscale(path), self.cfg, self.image_size)
 
         def __len__(self) -> int:
             return len(self.samples)
 
         def __getitem__(self, idx: int):
-            path, label = self.samples[idx]
-            img = preprocess_image(
-                load_grayscale(path), self.cfg, self.image_size
-            )
+            label = self.samples[idx][1]
+            img = self._cache[idx] if self._cache is not None else self._load(idx)
             if self.augment:
-                img = _augment(img, self._rng)
-            tensor = torch.from_numpy(img).unsqueeze(0).float()  # (1, H, W)
+                r = torch.randint(0, 4, (3,))
+                img = augment_image(
+                    img,
+                    flip_lr=bool(r[0] % 2),
+                    flip_ud=bool(r[1] % 2),
+                    k_rot90=int(r[2]),
+                )
+            tensor = torch.from_numpy(np.ascontiguousarray(img)).unsqueeze(0).float()
             return tensor, int(label)
 
 except ImportError:  # pragma: no cover

@@ -1,7 +1,7 @@
 """Histogram of Oriented Gradients (HOG) feature extraction.
 
 HOG encodes the distribution of local gradient orientations. For industrial
-surface defects — cracks, scratches, patch boundaries — this edge/gradient
+surface defects (cracks, scratches, patch boundaries) this edge/gradient
 prior is a strong, illumination-robust descriptor for a classical classifier.
 """
 

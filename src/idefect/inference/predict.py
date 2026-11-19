@@ -89,15 +89,16 @@ class Predictor:
         self._torch = torch
 
     # --------------------------------------------------------------- predict
-    def _preprocess(self, image: np.ndarray) -> np.ndarray:
-        return preprocess_image(image, self._prep_cfg, self.image_size)
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Apply the exact preprocessing used at training time."""
+        return preprocess_image(np.asarray(image), self._prep_cfg, self.image_size)
 
     def predict(self, image) -> PredictionResult:
         """Predict from an image path or a grayscale/color NumPy array."""
         if isinstance(image, (str, Path)):
             image = load_grayscale(image)
         image = np.asarray(image)
-        proc = self._preprocess(image)
+        proc = self.preprocess(image)
 
         if self._backend == "classical":
             return self._predict_classical(proc)
