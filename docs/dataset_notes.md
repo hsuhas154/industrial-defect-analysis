@@ -20,11 +20,31 @@
 
 ### Data quality
 
-* All 1,800 images are readable, 200x200, single-channel 8-bit.
-* Exact duplicate pair: `Pa_101.bmp` and `Pa_105.bmp` (identical pixels). Kept in
-  the same split by the duplicate-aware splitter.
-* Most images show an illumination gradient (darker towards one edge), which is
-  why local contrast normalisation (CLAHE) is part of preprocessing.
+* All 1,800 images are readable, 200x200, single-channel 8-bit, 300 per class.
+* **NEU-CLS is built largely from overlapping crops.** The near-duplicate
+  detector (`src/idefect/data/duplicates.py`) finds that 1,583 of the 1,800
+  images belong to 248 groups of related images:
+  * 3,238 pairs share an exact region of pixels (100 percent pixel agreement
+    over the overlap), often after a flip or a 90-degree rotation: crops cut
+    from the same strip image;
+  * 245 pairs are re-processed copies (same surface grain, different
+    brightness or contrast);
+  * one pair is byte-identical (`Pa_101.bmp`, `Pa_105.bmp`);
+  * some groups even cross classes: inclusion and scratch crops share exact
+    regions (for example `In_272.bmp` and `Sc_69.bmp`), where the shared part
+    is plain background and each image's defect lies outside it;
+  * groups chain along a strip; the largest has 105 inclusion images.
+* A plain stratified random split therefore puts close relatives of most test
+  images into the training set. This project keeps every group inside one
+  split (see `docs/methodology.md`); the leakage study in
+  `docs/experiments.md` measures how much a random split inflates scores.
+* Borderline pairs were decided by visual inspection and recorded in
+  `configs/duplicate_review.yaml`.
+* Most images show an illumination gradient (darker towards one edge), which
+  is why local contrast normalisation (CLAHE) is part of preprocessing.
+* `data/neu_cls_manifest.sha256` fingerprints every file; runs stop if any
+  image is missing or altered (an image viewer that re-saves a file would
+  otherwise change results silently).
 
 ### License / redistribution
 

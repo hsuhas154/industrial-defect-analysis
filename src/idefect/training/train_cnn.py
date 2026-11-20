@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -36,6 +36,7 @@ from idefect.evaluation.classification import (
     summarize,
 )
 from idefect.experiment_log import config_hash, environment_info, log_run
+from idefect.inference.input_check import confidence_floor, reference_stats
 from idefect.models.custom_cnn import CustomCNN, count_parameters
 from idefect.seed import set_seed
 from idefect.visualization.plots import plot_confusion_matrix, plot_training_curves
@@ -126,6 +127,9 @@ def _make_loaders(cfg: Config, split, device: torch.device):
         pin_memory=device.type == "cuda",
         persistent_workers=workers > 0,
         worker_init_fn=seed_worker if workers > 0 else None,
+        # forkserver avoids fork() from a multi-threaded process (CUDA and
+        # BLAS threads are already running), which can deadlock workers.
+        multiprocessing_context="forkserver" if workers > 0 else None,
     )
     train_loader = DataLoader(train_ds, shuffle=True, generator=gen, **common)
     val_loader = DataLoader(val_ds, shuffle=False, **common)
@@ -143,20 +147,27 @@ def _make_scheduler(cfg: Config, optimizer):
     return None
 
 
-def train_cnn(cfg: Config, config_path: str = "") -> Dict:
-    """Train the custom CNN and evaluate the selected checkpoint on the test split."""
-    set_seed(cfg.seed)
-    results_dir = Path(cfg.output.results_dir)
-    figures_dir = Path(cfg.output.figures_dir)
+def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_path: str = "",
+                verbose: bool = True, split_override=None, evaluate_test: bool = True) -> Dict:
+    """Train one CNN with ``seed`` on the shared split; write its artifacts to ``out_dir``.
+
+    With ``evaluate_test=False`` (used by tuning studies such as the epoch
+    study) the test split is never touched: only training and validation
+    numbers are produced.
+    """
+    set_seed(seed)
     device = resolve_device(cfg.cnn.device)
-    print(f"[cnn] device = {device}")
+    if split_override is not None:  # used by the leakage study only
+        split, groups, class_names = split_override, [], split_override.class_names
+    else:
+        _, class_names, split, groups = build_split(cfg)
+    if verbose:
+        print(f"[cnn] seed={seed} device={device} | {split.summary()} | "
+              f"{len(groups)} near-duplicate group(s) kept within one split")
 
-    _, class_names, split, dup_groups = build_split(cfg)
-    if dup_groups:
-        print(f"[data] {len(dup_groups)} exact-duplicate group(s) kept within one split")
-    print(f"[data] {split.summary()}")
-
-    train_loader, val_loader, test_loader = _make_loaders(cfg, split, device)
+    run_cfg = Config(**{**cfg.__dict__})
+    run_cfg.seed = seed
+    train_loader, val_loader, test_loader = _make_loaders(run_cfg, split, device)
 
     model = CustomCNN(
         num_classes=split.num_classes,
@@ -165,23 +176,17 @@ def train_cnn(cfg: Config, config_path: str = "") -> Dict:
         dropout=cfg.cnn.dropout,
     ).to(device)
     n_params = count_parameters(model)
-    print(f"[cnn] CustomCNN with {n_params:,} trainable parameters")
-
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=cfg.cnn.lr, weight_decay=cfg.cnn.weight_decay
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.cnn.lr, weight_decay=cfg.cnn.weight_decay)
     scheduler = _make_scheduler(cfg, optimizer)
 
     history: Dict[str, List[float]] = {
-        "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [],
-        "val_macro_f1": [], "lr": [],
+        "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "lr": [],
     }
     best: Dict[str, float] = {}
     best_state = None
     stale = 0
     patience = cfg.cnn.early_stopping_patience
-
     t0 = time.time()
     for epoch in range(1, cfg.cnn.epochs + 1):
         lr = optimizer.param_groups[0]["lr"]
@@ -189,43 +194,35 @@ def train_cnn(cfg: Config, config_path: str = "") -> Dict:
         yv, pv, _, va_loss = predict_loader(model, val_loader, device, criterion)
         va_acc = float((yv == pv).mean()) if len(yv) else 0.0
         va_f1 = float(f1_score(yv, pv, average="macro", zero_division=0)) if len(yv) else 0.0
-
         for k, v in (("train_loss", tr_loss), ("train_acc", tr_acc), ("val_loss", va_loss),
                      ("val_acc", va_acc), ("val_macro_f1", va_f1), ("lr", lr)):
             history[k].append(v)
-        print(
-            f"[epoch {epoch:3d}/{cfg.cnn.epochs}] lr={lr:.2e} "
-            f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} | "
-            f"val_loss={va_loss:.4f} val_acc={va_acc:.4f} val_f1={va_f1:.4f}"
-        )
-
-        current = {"val_loss": va_loss, "val_acc": va_acc, "val_macro_f1": va_f1,
-                   "epoch": epoch}
+        if verbose and (epoch == 1 or epoch % 10 == 0 or epoch == cfg.cnn.epochs):
+            print(f"[epoch {epoch:3d}/{cfg.cnn.epochs}] lr={lr:.2e} train_loss={tr_loss:.4f} "
+                  f"train_acc={tr_acc:.4f} | val_loss={va_loss:.4f} val_acc={va_acc:.4f} val_f1={va_f1:.4f}")
+        current = {"val_loss": va_loss, "val_acc": va_acc, "val_macro_f1": va_f1, "epoch": epoch}
         if _is_better(cfg.cnn.select_metric, current, best):
             best = current
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             stale = 0
         else:
             stale += 1
-
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             scheduler.step(va_loss)
         elif scheduler is not None:
             scheduler.step()
-
         if patience and stale >= patience:
-            print(f"[cnn] early stopping at epoch {epoch} (no improvement for {patience})")
+            if verbose:
+                print(f"[cnn] early stopping at epoch {epoch}")
             break
-
     train_time = time.time() - t0
-    print(
-        f"[cnn] training finished in {train_time:.1f}s; best epoch={best.get('epoch')} "
-        f"val_acc={best.get('val_acc', 0):.4f} val_f1={best.get('val_macro_f1', 0):.4f}"
-    )
-
     if best_state is not None:
         model.load_state_dict(best_state)
-    results_dir.mkdir(parents=True, exist_ok=True)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    yv_true, _, pv_val, _ = predict_loader(model, val_loader, device)
+    reference = {"image": reference_stats([p for p, _ in split.train]),
+                 "confidence_floor": confidence_floor(pv_val, yv_true)}
     torch.save(
         {
             "state_dict": model.state_dict(),
@@ -236,18 +233,33 @@ def train_cnn(cfg: Config, config_path: str = "") -> Dict:
             "preprocessing": cfg.preprocessing,
             "n_params": n_params,
             "best_epoch": best.get("epoch"),
+            "seed": seed,
             "config_hash": config_hash(cfg),
+            "reference": reference,
         },
-        results_dir / "custom_cnn.pt",
+        out_dir / "custom_cnn.pt",
     )
-
-    # Final, single evaluation on the held-out test split.
+    with open(out_dir / "custom_cnn_history.json", "w") as fh:
+        json.dump(history, fh, indent=2)
+    if not evaluate_test:
+        return {
+            "seed": seed,
+            "epochs_run": len(history["train_loss"]),
+            "best_epoch": best.get("epoch"),
+            "best_val_acc": round(best.get("val_acc", 0.0), 4),
+            "best_val_macro_f1": round(best.get("val_macro_f1", 0.0), 4),
+            "train_time_sec": round(train_time, 2),
+            "device": str(device),
+        }
     t1 = time.time()
     y_true, y_pred, y_proba, _ = predict_loader(model, test_loader, device)
     infer_time = time.time() - t1
     metrics = compute_metrics(y_true, y_pred, class_names, y_proba=y_proba)
     metrics.update(
         model="custom_cnn",
+        display_name="Custom CNN",
+        branch="cnn",
+        seed=seed,
         train_time_sec=round(train_time, 2),
         test_inference_sec=round(infer_time, 3),
         epochs_run=len(history["train_loss"]),
@@ -259,21 +271,64 @@ def train_cnn(cfg: Config, config_path: str = "") -> Dict:
         config_hash=config_hash(cfg),
         environment=environment_info(),
     )
-    print(f"[eval:cnn] {summarize(metrics)}")
-    print(format_report(y_true, y_pred, class_names))
+    save_metrics(metrics, out_dir / "custom_cnn_metrics.json")
+    save_predictions(out_dir / "custom_cnn_test_predictions.csv", [p for p, _ in split.test],
+                     y_true, y_pred, class_names, y_proba)
+    log_run(cfg.output.logs_dir, f"custom_cnn_seed{seed}", cfg, metrics, config_path=config_path)
+    if verbose:
+        print(f"[eval:cnn seed={seed}] {summarize(metrics)} | best epoch {best.get('epoch')} "
+              f"val_f1 {best.get('val_macro_f1', 0):.4f} | {train_time:.1f}s")
+    return metrics
 
+
+def train_cnn(cfg: Config, config_path: str = "", seeds: Optional[Sequence[int]] = None) -> Dict:
+    """Train the custom CNN once per seed on the same split.
+
+    The artifact kept as ``custom_cnn.pt`` is the seed with the best
+    *validation* macro-F1 (never chosen on test). Test metrics are reported for
+    that model and as mean and standard deviation over all seeds.
+    """
+    import shutil
+
+    seeds = list(seeds) if seeds else list(cfg.cnn.seeds) or [cfg.seed]
+    results_dir = Path(cfg.output.results_dir)
+    figures_dir = Path(cfg.output.figures_dir)
+    runs = {}
+    for s in seeds:
+        runs[s] = _train_once(cfg, s, results_dir / "cnn_runs" / f"seed{s}", figures_dir,
+                              config_path=config_path)
+
+    chosen = max(seeds, key=lambda s: (runs[s]["best_val_macro_f1"], -s))
+    src = results_dir / "cnn_runs" / f"seed{chosen}"
+    for name in ("custom_cnn.pt", "custom_cnn_test_predictions.csv", "custom_cnn_history.json"):
+        shutil.copyfile(src / name, results_dir / name)
+    metrics = dict(runs[chosen])
+
+    def stat(key):
+        v = np.array([runs[s][key] for s in seeds], dtype=float)
+        return {"mean": float(v.mean()), "std": float(v.std(ddof=1)) if len(v) > 1 else 0.0,
+                "min": float(v.min()), "max": float(v.max())}
+
+    metrics["seed_summary"] = {
+        "seeds": seeds,
+        "chosen_seed": chosen,
+        "selection": "best validation macro-F1",
+        "test_macro_f1": stat("macro_f1"),
+        "test_accuracy": stat("accuracy"),
+        "val_macro_f1": stat("best_val_macro_f1"),
+        "train_time_sec": stat("train_time_sec"),
+        "per_seed": {str(s): {"test_macro_f1": runs[s]["macro_f1"], "test_accuracy": runs[s]["accuracy"],
+                              "val_macro_f1": runs[s]["best_val_macro_f1"],
+                              "best_epoch": runs[s]["best_epoch"]} for s in seeds},
+    }
     save_metrics(metrics, results_dir / "custom_cnn_metrics.json")
-    save_predictions(
-        results_dir / "custom_cnn_test_predictions.csv",
-        [p for p, _ in split.test], y_true, y_pred, class_names, y_proba,
-    )
-    with open(results_dir / "custom_cnn_history.json", "w") as fh:
-        json.dump(history, fh, indent=2)
-    plot_confusion_matrix(
-        metrics["confusion_matrix"], class_names,
-        figures_dir / "custom_cnn_confusion_matrix.png",
-        title="Custom CNN confusion matrix",
-    )
+    with open(src / "custom_cnn_history.json") as fh:
+        history = json.load(fh)
+    plot_confusion_matrix(metrics["confusion_matrix"], metrics["class_names"],
+                          figures_dir / "custom_cnn_confusion_matrix.png",
+                          title=f"Custom CNN confusion matrix (seed {chosen})")
     plot_training_curves(history, figures_dir / "custom_cnn_training_curves.png")
-    log_run(cfg.output.logs_dir, "custom_cnn", cfg, metrics, config_path=config_path)
+    ss = metrics["seed_summary"]["test_macro_f1"]
+    print(f"[cnn] {len(seeds)} seeds: test macro-F1 {ss['mean']:.4f} +- {ss['std']:.4f} "
+          f"(min {ss['min']:.4f}, max {ss['max']:.4f}); kept seed {chosen} (best val)")
     return metrics

@@ -1,21 +1,37 @@
 """Matplotlib visualizations written to disk.
 
 Uses the non-interactive Agg backend so plots render on headless machines and
-inside WSL without a display server.
+inside WSL without a display server. Inside a Jupyter kernel the backend is
+left alone, so figures drawn in a notebook are still displayed inline.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Dict, List, Sequence
 
 import matplotlib
 
-matplotlib.use("Agg")
+if "ipykernel" not in sys.modules:
+    matplotlib.use("Agg")
 # Render negative tick labels with an ASCII hyphen rather than a Unicode minus.
 matplotlib.rcParams["axes.unicode_minus"] = False
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+
+
+def tidy(fig) -> None:
+    """``tight_layout`` that also leaves room for a figure title (suptitle).
+
+    Plain ``tight_layout`` ignores the suptitle, which then overlaps the top
+    row of panels; here the top margin is reserved explicitly.
+    """
+    if getattr(fig, "_suptitle", None) is not None:
+        height = fig.get_size_inches()[1]
+        fig.tight_layout(rect=(0, 0, 1, 1 - min(0.15, 0.6 / height)))
+    else:
+        fig.tight_layout()
 
 
 def _ensure_parent(path: str | Path) -> Path:
@@ -68,7 +84,7 @@ def plot_confusion_matrix(
                 fontsize=8,
             )
 
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -94,7 +110,7 @@ def plot_training_curves(history: Dict[str, List[float]], out_path: str | Path) 
     ax2.legend()
     ax2.grid(alpha=0.3)
 
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -110,7 +126,7 @@ def plot_hog(image: np.ndarray, hog_image: np.ndarray, out_path: str | Path) -> 
     ax2.imshow(hog_image, cmap="gray")
     ax2.set_title("HOG features")
     ax2.axis("off")
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -135,7 +151,7 @@ def plot_sample_grid(
         ax.imshow(img, cmap="gray")
         ax.set_title(label, fontsize=9)
     fig.suptitle(title)
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

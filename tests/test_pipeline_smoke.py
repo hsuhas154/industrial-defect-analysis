@@ -20,6 +20,7 @@ def tiny_cfg(dummy_dataset, tmp_path_factory) -> Config:
     out = tmp_path_factory.mktemp("runs")
     cfg = Config()
     cfg.data.root = str(dummy_dataset)
+    cfg.data.manifest = ""
     cfg.data.image_size = 32
     cfg.data.train_frac, cfg.data.val_frac, cfg.data.test_frac = 0.5, 0.25, 0.25
     cfg.hog.pixels_per_cell = [8, 8]
@@ -28,6 +29,14 @@ def tiny_cfg(dummy_dataset, tmp_path_factory) -> Config:
     cfg.cnn.num_workers = 0
     cfg.cnn.base_channels = 8
     cfg.cnn.device = "cpu"
+    cfg.classical_ml.feature_sets = ["hog", "lbp+glcm"]
+    cfg.classical_ml.models = ["decision_tree", "svm"]
+    cfg.classical_ml.cv_folds = 3
+    cfg.classical_ml.n_jobs = 2  # a tiny test needs no more than two worker processes
+    cfg.cnn.seeds = [0, 1]
+    cfg.data.duplicates.cache_dir = str(out / "cache")
+    cfg.data.duplicates.review_file = ""
+    cfg.data.duplicates.top_k = 3
     cfg.output.results_dir = str(out / "results")
     cfg.output.figures_dir = str(out / "figures")
     cfg.output.logs_dir = str(out / "logs")
@@ -45,18 +54,23 @@ def trained(tiny_cfg):
 def test_classical_training_writes_artifacts(trained):
     cfg, metrics = trained
     results = Path(cfg.output.results_dir)
-    for kind in ("hog+decision_tree", "hog+svm"):
+    assert set(metrics) == {"decision_tree", "svm"}
+    for m in metrics.values():
+        kind = m["model"]
         assert (results / f"{kind}.joblib").exists()
         assert (results / f"{kind}_metrics.json").exists()
         assert (results / f"{kind}_test_predictions.csv").exists()
-        assert 0.0 <= metrics[kind]["macro_f1"] <= 1.0
+        assert 0.0 <= m["macro_f1"] <= 1.0
+        assert m["cv_macro_f1_mean"] is not None and m["latency_ms_per_image"] > 0
+    assert (results / "classical" / "grid.csv").exists()
     assert (Path(cfg.output.logs_dir) / "runs.csv").exists()
 
 
 def test_predictor_roundtrip_classical(trained, dummy_dataset):
     cfg, _ = trained
     image = next(Path(dummy_dataset).rglob("*.png"))
-    pred = Predictor(Path(cfg.output.results_dir) / "hog+svm.joblib").predict(image)
+    art = sorted(Path(cfg.output.results_dir).glob("*svm.joblib"))[0]
+    pred = Predictor(art).predict(image)
     assert pred.label in pred.probabilities
     assert abs(sum(pred.probabilities.values()) - 1.0) < 1e-6
 
@@ -67,6 +81,7 @@ def test_cnn_training_and_prediction(tiny_cfg, dummy_dataset):
 
     metrics = train_cnn(tiny_cfg)
     assert metrics["epochs_run"] == 2
+    assert metrics["seed_summary"]["seeds"] == [0, 1]
     ckpt = Path(tiny_cfg.output.results_dir) / "custom_cnn.pt"
     image = next(Path(dummy_dataset).rglob("*.png"))
     pred = Predictor(ckpt).predict(image)

@@ -39,11 +39,27 @@ python scripts/dataset_report.py
 Version used for the reported results: archive SHA-256
 `a85bcc6bfa1a40e76f28079e135694aaf5f6a4ee01203f7eaacff0ebafaa96f8`.
 
-### Known data issue: one duplicate pair
+### Known data issues: duplicates and overlapping crops
 
-`Pa_101.bmp` and `Pa_105.bmp` are byte-identical. The split keeps exact
-duplicates in the same partition (`data.group_duplicates: true` in the config),
-so the duplicate cannot appear in both training and test data.
+`Pa_101.bmp` and `Pa_105.bmp` are byte-identical, and far more importantly
+most NEU-CLS images share exact regions with other images (overlapping crops,
+often flipped or rotated) or are re-processed copies of each other. The
+pipeline detects these relations and keeps each group inside one split; see
+`docs/dataset_notes.md` for the numbers and `docs/methodology.md` for the
+method.
+
+### Integrity
+
+`data/neu_cls_manifest.sha256` lists the SHA-256 of every image. Check it
+with:
+
+```bash
+(cd data/raw/NEU-CLS && sha256sum -c ../../neu_cls_manifest.sha256 --quiet) && echo intact
+```
+
+Every run performs the same check and stops if a file is missing or changed.
+Do not open, rotate or save images inside `data/raw` with an image editor or
+viewer; copy them elsewhere first.
 
 ### License caution
 

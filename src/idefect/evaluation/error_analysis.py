@@ -62,7 +62,10 @@ def plot_misclassified_gallery(
     n = len(wrong)
     cols = min(cols, n)
     grid_rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(grid_rows, cols, figsize=(2.1 * cols, 2.45 * grid_rows))
+    # Constrained layout sizes each row to fit its two-line caption and places
+    # the figure title above the grid, so captions never cover the images.
+    fig, axes = plt.subplots(grid_rows, cols, figsize=(2.2 * cols, 2.75 * grid_rows + 0.5),
+                             layout="constrained")
     axes = np.atleast_1d(axes).ravel()
     for ax in axes:
         ax.axis("off")
@@ -72,7 +75,6 @@ def plot_misclassified_gallery(
         conf_txt = f" ({float(conf):.2f})" if conf else ""
         ax.set_title(f"true: {r['true']}\npred: {r['pred']}{conf_txt}", fontsize=7)
     fig.suptitle(title)
-    fig.tight_layout()
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

@@ -49,6 +49,10 @@ idefect-predict = "idefect.scripts_entry:predict_main"
 idefect-dataset-report = "idefect.scripts_entry:dataset_report_main"
 idefect-error-analysis = "idefect.scripts_entry:error_analysis_main"
 idefect-compare = "idefect.scripts_entry:compare_main"
+idefect-ablations = "idefect.scripts_entry:ablations_main"
+idefect-classical-report = "idefect.scripts_entry:classical_report_main"
+idefect-epoch-study = "idefect.scripts_entry:epoch_study_main"
+idefect-leakage-study = "idefect.scripts_entry:leakage_study_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -8,6 +8,7 @@ imbalance, and split leakage. The result is a JSON-serialisable report.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -77,8 +78,14 @@ def audit_samples(samples: Sequence[Sample], class_names: Sequence[str]) -> Dict
     }
 
 
-def audit_split(split: DatasetSplit, duplicate_groups: Sequence[Sequence[str]] = ()) -> Dict:
-    """Check that a split is disjoint, stratified and free of duplicate leakage."""
+def audit_split(split: DatasetSplit, duplicate_groups: Sequence[Sequence[str]] = (),
+                near_duplicate_groups: Sequence[Sequence[str]] = ()) -> Dict:
+    """Check that a split is disjoint, stratified and free of duplicate leakage.
+
+    ``duplicate_groups`` are exact whole-image duplicates; ``near_duplicate_groups``
+    are the detector's groups (overlaps, flipped/rotated and re-processed copies).
+    Both must never span two splits.
+    """
     names = split.class_names
     parts = {"train": split.train, "val": split.val, "test": split.test}
     sets = {k: {p for p, _ in v} for k, v in parts.items()}
@@ -95,11 +102,16 @@ def audit_split(split: DatasetSplit, duplicate_groups: Sequence[Sequence[str]] =
     }
 
     which = {p: k for k, s in sets.items() for p in s}
-    leaking_groups = []
-    for group in duplicate_groups:
-        homes = {which.get(p) for p in group if p in which}
-        if len(homes) > 1:
-            leaking_groups.append(list(group))
+    def leaking(groups):
+        out = []
+        for group in groups:
+            homes = {which.get(p) for p in group if p in which}
+            if len(homes) > 1:
+                out.append(list(group))
+        return out
+
+    leaking_groups = leaking(duplicate_groups)
+    leaking_near = leaking(near_duplicate_groups)
 
     return {
         "sizes": {k: len(v) for k, v in parts.items()},
@@ -107,12 +119,52 @@ def audit_split(split: DatasetSplit, duplicate_groups: Sequence[Sequence[str]] =
         "is_disjoint": all(v == 0 for v in overlaps.values()),
         "class_distribution": distribution,
         "duplicate_groups_across_splits": leaking_groups,
+        "near_duplicate_groups_across_splits": leaking_near,
     }
 
 
-def problems(report: Dict, split_report: Dict | None = None) -> List[str]:
-    """Human-readable list of issues found (empty list means all checks passed)."""
+def verify_manifest(root: str | Path, manifest: str | Path) -> Dict:
+    """Compare the dataset folder with a SHA-256 manifest (``sha256sum`` format).
+
+    Catches images that were deleted, re-saved or edited after download (for
+    example by an image viewer that rewrites files), which would otherwise
+    change results silently.
+    """
+    root, manifest = Path(root), Path(manifest)
+    if not manifest.is_file():
+        return {"checked": False}
+    expected = {}
+    for line in manifest.read_text().splitlines():
+        if line.strip():
+            digest, name = line.split(maxsplit=1)
+            expected[name.strip().lstrip("*")] = digest
+    missing, modified = [], []
+    for name, digest in expected.items():
+        f = root / name
+        if not f.is_file():
+            missing.append(name)
+        elif hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+            modified.append(name)
+    present = {p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".bmp"} \
+        if root.is_dir() else set()
+    unexpected = sorted(present - set(expected))
+    return {"checked": True, "n_expected": len(expected), "missing": missing,
+            "modified": modified, "unexpected": unexpected}
+
+
+def problems(report: Dict, split_report: Dict | None = None,
+             duplicate_summary: Dict | None = None, manifest: Dict | None = None) -> List[str]:
+    """Human-readable list of issues found (empty list means all checks passed).
+
+    ``duplicate_summary`` is the near-duplicate detector's summary; pairs that
+    still await a human review decision are reported as issues.
+    """
     issues: List[str] = []
+    if manifest and manifest.get("checked"):
+        for key in ("missing", "modified", "unexpected"):
+            if manifest[key]:
+                issues.append(f"dataset differs from the manifest: {len(manifest[key])} {key} "
+                              f"file(s), e.g. {manifest[key][:3]}")
     if report["unreadable_files"]:
         issues.append(f"{len(report['unreadable_files'])} unreadable image file(s)")
     if len(report["image_shapes"]) > 1:
@@ -135,4 +187,14 @@ def problems(report: Dict, split_report: Dict | None = None) -> List[str]:
                 f"{len(split_report['duplicate_groups_across_splits'])} duplicate group(s) "
                 "span more than one split (leakage)"
             )
+        if split_report.get("near_duplicate_groups_across_splits"):
+            issues.append(
+                f"{len(split_report['near_duplicate_groups_across_splits'])} near-duplicate "
+                "group(s) span more than one split (leakage)"
+            )
+    if duplicate_summary is not None:
+        pending = duplicate_summary.get("pairs_by_decision", {}).get("review", 0)
+        if pending:
+            issues.append(f"{pending} near-duplicate pair(s) await a review decision "
+                          "(grouped for safety meanwhile; see configs/duplicate_review.yaml)")
     return issues

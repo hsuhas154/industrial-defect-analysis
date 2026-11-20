@@ -49,11 +49,16 @@ def train_classical_main() -> None:
 def train_cnn_main() -> None:
     from idefect.training.train_cnn import train_cnn
 
-    p = argparse.ArgumentParser(description="Train the custom CNN baseline.")
+    p = argparse.ArgumentParser(description="Train the custom CNN (one run per seed).")
     _add_config_arg(p)
+    p.add_argument("--seeds", type=int, nargs="*", default=None,
+                   help="Override cnn.seeds from the config, e.g. --seeds 42 43")
+    p.add_argument("--epochs", type=int, default=None, help="Override cnn.epochs")
     args = p.parse_args()
     cfg = load_config(args.config)
-    train_cnn(cfg, config_path=args.config)
+    if args.epochs:
+        cfg.cnn.epochs = args.epochs
+    train_cnn(cfg, config_path=args.config, seeds=args.seeds)
 
 
 def predict_main() -> None:
@@ -81,34 +86,84 @@ def predict_main() -> None:
 
 def dataset_report_main() -> None:
     import json
+    from dataclasses import asdict
     from pathlib import Path
 
-    from idefect.data.datasets import build_split
-    from idefect.data.stats import audit_samples, audit_split, problems
+    from idefect.data.datasets import build_split, duplicate_report
+    from idefect.data.stats import audit_samples, audit_split, problems, verify_manifest
     from idefect.visualization import eda
+    from idefect.visualization.duplicates import plot_group_sizes, plot_pairs
 
     p = argparse.ArgumentParser(
-        description="Dataset statistics, sanity checks and exploratory figures."
+        description="Dataset statistics, sanity checks, near-duplicate audit and EDA figures."
     )
     _add_config_arg(p)
     args = p.parse_args()
     cfg = load_config(args.config)
 
-    samples, class_names, split, _ = build_split(cfg)
+    manifest = verify_manifest(cfg.data.root, cfg.data.manifest) if cfg.data.manifest else {"checked": False}
+    if manifest.get("checked"):
+        bad = len(manifest["missing"]) + len(manifest["modified"]) + len(manifest["unexpected"])
+        print(f"[data] manifest check: {manifest['n_expected']} files expected, "
+              f"{'all intact' if not bad else str(bad) + ' problem(s)'}")
+    samples, class_names, split, groups = build_split(cfg, verbose=True)
     print(f"[data] {len(samples)} images, {len(class_names)} classes under {cfg.data.root}")
     report = audit_samples(samples, class_names)
-    split_report = audit_split(split, report["duplicate_groups"])
-    issues = problems(report, split_report)
+    dup = duplicate_report(cfg, samples) if cfg.data.duplicates.enabled else None
+    dsum = dup.summary() if dup else None
+    split_report = audit_split(split, report["duplicate_groups"], groups)
+    issues = problems(report, split_report, dsum, manifest)
     notes = []
-    if report["n_duplicate_images"] and not split_report["duplicate_groups_across_splits"]:
-        notes.append(f"{report['n_duplicate_images']} exact duplicate image(s) "
-                     f"{report['duplicate_groups']} kept inside one split (no leakage)")
+    if dsum:
+        notes.append(f"{dsum['n_images_in_groups']} images in {dsum['n_groups']} near-duplicate "
+                     f"group(s) (largest {dsum['largest_group']}); every group kept inside one split")
+        if dup.unverified:
+            notes.append(f"{len(dup.unverified)} similar pair(s) could not be verified either way "
+                         "(too little background texture); kept apart, listed for inspection")
 
-    out = Path(cfg.output.results_dir) / "dataset_report.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    res_dir = Path(cfg.output.results_dir)
+    res_dir.mkdir(parents=True, exist_ok=True)
+    out = res_dir / "dataset_report.json"
     with open(out, "w") as fh:
-        json.dump({"dataset": report, "split": split_report, "issues": issues, "notes": notes},
-                  fh, indent=2)
+        json.dump({"dataset": report, "manifest": manifest, "split": split_report, "near_duplicates": dsum,
+                   "issues": issues, "notes": notes}, fh, indent=2)
+    if dup:
+        with open(res_dir / "near_duplicates.json", "w") as fh:
+            json.dump({"summary": dsum, "groups": dup.groups,
+                       "pairs": [asdict(x) for x in dup.pairs if x.kind != "distinct"],
+                       "closest_distinct": [asdict(x) for x in
+                                            sorted((x for x in dup.pairs if x.kind == "distinct"
+                                                    and x.grain is not None),
+                                                   key=lambda x: -x.grain)[:50]]},
+                      fh, indent=2)
+        ddir = Path(cfg.output.figures_dir) / "duplicates"
+        plot_group_sizes(dup.groups, ddir / "group_sizes.png")
+        same = [x for x in dup.pairs if x.kind == "same"]
+        plot_pairs([x for x in same if x.evidence == "pixel-identical"][::max(1, len(same) // 12)],
+                   ddir / "same_pixel_identical.png",
+                   "Grouped: pixel-identical overlaps (sample)")
+        plot_pairs(sorted((x for x in same if x.evidence == "grain"), key=lambda x: x.grain),
+                   ddir / "same_grain_weakest.png",
+                   "Grouped: re-processed copies, weakest evidence first")
+        plot_pairs(dup.unresolved_review, ddir / "review_pairs.png",
+                   "Awaiting review (grouped for safety until decided)", max_rows=40)
+        plot_pairs(sorted((x for x in dup.pairs if x.kind == "distinct" and x.grain is not None),
+                          key=lambda x: -x.grain), ddir / "distinct_closest.png",
+                   "Kept apart: the most similar pairs judged distinct")
+        plot_pairs(sorted(dup.unverified, key=lambda x: -x.overlap_px), ddir / "unverified.png",
+                   "Kept apart, not verifiable (too little background texture)")
+        # The pairs that matter most for leakage: judged distinct, closest to the
+        # review band, and actually placed in different splits.
+        where = {p: n for n in ("train", "val", "test") for p, _ in getattr(split, n)}
+        gid = {p: k for k, g in enumerate(dup.groups) for p in g}
+        boundary = [x for x in sorted((x for x in dup.pairs if x.kind == "distinct" and x.grain is not None),
+                                      key=lambda x: -x.grain)
+                    if x.grain >= 0.25 and where.get(x.a) != where.get(x.b)
+                    and not (x.a in gid and gid.get(x.a) == gid.get(x.b))]
+        plot_pairs(boundary, ddir / "distinct_across_splits.png",
+                   "Judged distinct and placed in different splits (grain >= 0.25)", max_rows=20)
+        notes.append(f"{len(boundary)} distinct pair(s) with grain >= 0.25 sit in different splits; "
+                     "see figures/duplicates/distinct_across_splits.png")
 
     fig_dir = Path(cfg.output.figures_dir) / "eda"
     eda.plot_class_balance(report["per_class_counts"], fig_dir / "class_balance.png")
@@ -124,6 +179,10 @@ def dataset_report_main() -> None:
     print(f"[data] counts: {report['per_class_counts']}")
     print(f"[data] shapes: {report['image_shapes']}  dtypes: {report['dtypes']}")
     print(f"[split] {split_report['sizes']}  disjoint={split_report['is_disjoint']}")
+    print(f"[split] per class: {split_report['class_distribution']}")
+    if dsum:
+        print(f"[dups] {dsum['pairs_by_decision']}  evidence for grouped pairs: "
+              f"{dsum['same_pairs_by_evidence']}")
     for n in notes:
         print(f"[note] {n}")
     if issues:
@@ -132,7 +191,7 @@ def dataset_report_main() -> None:
             print(f"  - {i}")
     else:
         print("[check] all sanity checks passed")
-    print(f"[out] {out} and figures in {fig_dir}")
+    print(f"[out] {out} and figures in {Path(cfg.output.figures_dir)}")
 
 
 def error_analysis_main() -> None:
@@ -184,5 +243,64 @@ def compare_main() -> None:
     for k, v in paths.items():
         print(f"[out] {k}: {v}")
     if args.update_readme:
-        changed = update_readme(args.readme, markdown_table(collect_metrics(cfg.output.results_dir)))
+        changed = update_readme(
+            args.readme, markdown_table(collect_metrics(cfg.output.results_dir), include_time=False))
         print(f"[readme] {'updated' if changed else 'already up to date'}")
+
+
+def ablations_main() -> None:
+    from pathlib import Path
+
+    from idefect.training.ablations import run_ablations
+
+    p = argparse.ArgumentParser(description="Classical-branch ablations (preprocessing, resolution, HOG).")
+    _add_config_arg(p)
+    p.add_argument("--feature-sets", nargs="*", default=["hog", "lbp", "glcm", "lbp+glcm"])
+    p.add_argument("--models", nargs="*", default=["svm", "logreg"])
+    p.add_argument("--hog-models", nargs="*", default=["svm"])
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    run_ablations(cfg, args.feature_sets, args.models, args.hog_models,
+                  Path(cfg.output.results_dir) / "classical")
+
+
+def classical_report_main() -> None:
+    from idefect.evaluation.classical_report import make_classical_figures
+
+    p = argparse.ArgumentParser(description="All classical-branch figures from saved results.")
+    _add_config_arg(p)
+    args = p.parse_args()
+    out = make_classical_figures(load_config(args.config))
+    for k, v in out.items():
+        print(f"[fig] {k}: {v}")
+
+
+def epoch_study_main() -> None:
+    from pathlib import Path
+
+    from idefect.training.studies import cnn_epoch_study
+
+    p = argparse.ArgumentParser(description="CNN training length chosen on validation macro-F1.")
+    _add_config_arg(p)
+    p.add_argument("--epochs", type=int, nargs="*", default=[40, 80, 150])
+    p.add_argument("--seeds", type=int, nargs="*", default=[42, 43, 44])
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    for row in cnn_epoch_study(cfg, args.epochs, args.seeds, Path(cfg.output.results_dir) / "cnn_epoch_study"):
+        print(f"[epochs={row['epochs']}] val macro-F1 {row['val_macro_f1_mean']:.4f} +- {row['val_macro_f1_std']:.4f}")
+
+
+def leakage_study_main() -> None:
+    from pathlib import Path
+
+    from idefect.training.studies import leakage_study
+
+    p = argparse.ArgumentParser(description="Random split versus group-aware split.")
+    _add_config_arg(p)
+    p.add_argument("--classical", nargs="*", default=["lbp+glcm:logreg", "lbp+glcm:svm", "hog:svm"],
+                   help="feature_set:model pairs")
+    p.add_argument("--cnn-seeds", type=int, nargs="*", default=[42, 43, 44])
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    pairs = [tuple(x.split(":")) for x in args.classical]
+    leakage_study(cfg, pairs, args.cnn_seeds, Path(cfg.output.results_dir) / "leakage_study")

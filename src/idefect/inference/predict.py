@@ -2,11 +2,13 @@
 
 Handles both artifact kinds produced by the training scripts:
 
-* classical joblib bundles (``*.joblib``): HOG + Decision Tree / SVM;
+* classical joblib bundles (``*.joblib``): a feature set (HOG, LBP, GLCM or
+  a combination) with a classifier (Decision Tree, logistic regression,
+  k-NN, SVM, Random Forest or XGBoost);
 * CNN checkpoints (``*.pt``): the custom CNN.
 
-The saved artifacts carry their own preprocessing/HOG config so the exact
-feature pipeline used at training time is reproduced here.
+The saved artifacts carry their own preprocessing and feature configs so the
+exact feature pipeline used at training time is reproduced here.
 """
 
 from __future__ import annotations
@@ -18,7 +20,16 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from idefect.data.preprocessing import load_grayscale, preprocess_image
-from idefect.features.hog import extract_hog
+from idefect.features.registry import extract_one
+
+
+def n_neighbors_of(model) -> Optional[int]:
+    """Number of neighbours of a k-NN model (bare or the ``clf`` step of a
+    pipeline); None for any other model."""
+    steps = getattr(model, "named_steps", None)
+    clf = steps["clf"] if steps is not None and "clf" in steps else model
+    k = getattr(clf, "n_neighbors", None)
+    return int(k) if k is not None else None
 
 
 @dataclass
@@ -39,6 +50,8 @@ class Predictor:
         self.class_names: List[str] = []
         self.image_size: int = 128
         self._backend: str = ""  # "classical" | "cnn"
+        self.reference: dict = {}
+        self.n_neighbors: Optional[int] = None  # set for k-NN models
         self._load()
 
     # ------------------------------------------------------------------ load
@@ -60,10 +73,24 @@ class Predictor:
         self._backend = "classical"
         self.kind = bundle["kind"]
         self.model = bundle["model"]
+        self.n_neighbors = n_neighbors_of(self.model)
         self.class_names = bundle["class_names"]
         self.image_size = bundle["image_size"]
         self._hog_cfg = bundle["hog"]
         self._prep_cfg = bundle["preprocessing"]
+        self.reference = bundle.get("reference", {})
+        # Bundles from the feature-registry trainer name their feature set;
+        # older bundles are plain HOG.
+        self.feature_set = bundle.get("feature_set", "hog")
+        from idefect.config import Config
+
+        fcfg = Config()
+        fcfg.hog = bundle["hog"]
+        if "lbp" in bundle:
+            fcfg.lbp = bundle["lbp"]
+        if "glcm" in bundle:
+            fcfg.glcm = bundle["glcm"]
+        self._feature_cfg = fcfg
 
     def _load_cnn(self) -> None:
         import torch
@@ -76,6 +103,7 @@ class Predictor:
         self.class_names = ckpt["class_names"]
         self.image_size = ckpt["image_size"]
         self._prep_cfg = ckpt["preprocessing"]
+        self.reference = ckpt.get("reference", {})
         cnn_cfg = ckpt["cnn_config"]
         model = CustomCNN(
             num_classes=ckpt["num_classes"],
@@ -105,7 +133,7 @@ class Predictor:
         return self._predict_cnn(proc)
 
     def _predict_classical(self, proc: np.ndarray) -> PredictionResult:
-        feats = extract_hog(proc, self._hog_cfg).reshape(1, -1)
+        feats = extract_one(proc, self.feature_set, self._feature_cfg).reshape(1, -1)
         idx = int(self.model.predict(feats)[0])
         probs = None
         conf = None

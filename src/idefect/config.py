@@ -15,15 +15,47 @@ from typing import Any, Dict, List
 import yaml
 
 
+
+@dataclass
+class DuplicateConfig:
+    """Near-duplicate detection settings (see idefect.data.duplicates)."""
+
+    enabled: bool = True
+    # E1: exact overlaps
+    segment_len: int = 12
+    segment_stride: int = 3
+    min_segment_range: int = 10      # skip flat runs (max - min below this)
+    max_key_occurrences: int = 40    # skip non-discriminative runs
+    min_votes: int = 4
+    exact_tolerance: int = 2
+    exact_fraction: float = 0.99
+    min_exact_overlap_px: int = 1024
+    # E2: re-processed copies
+    thumb_size: int = 64
+    top_k: int = 10
+    min_overlap: float = 0.25
+    grain_same: float = 0.50
+    grain_review: float = 0.40
+    grain_min_tiles: int = 12
+    grain_tile: int = 16
+    grain_mask_grow: int = 12
+    # misc
+    device: str = "auto"
+    review_file: str = "configs/duplicate_review.yaml"
+    cache_dir: str = "experiments/cache"
+
+
 @dataclass
 class DataConfig:
     root: str = "data/raw/NEU-CLS"
+    manifest: str = "data/neu_cls_manifest.sha256"  # SHA-256 of every image; "" to skip
     image_size: int = 128
     grayscale: bool = True
     train_frac: float = 0.70
     val_frac: float = 0.15
     test_frac: float = 0.15
-    group_duplicates: bool = True  # keep exact-duplicate images in the same split
+    split_seed: int = 42  # fixed so every model and every training seed shares one split
+    duplicates: DuplicateConfig = field(default_factory=DuplicateConfig)
 
 
 @dataclass
@@ -46,6 +78,21 @@ class HOGConfig:
 
 
 @dataclass
+class LBPConfig:
+    points_radii: List[List[float]] = field(default_factory=lambda: [[8, 1], [16, 2], [24, 3]])
+    method: str = "uniform"  # rotation-invariant uniform patterns (P + 2 codes)
+    grid: int = 1            # 1 = global histogram; 2 = 2x2 cells, ...
+
+
+@dataclass
+class GLCMConfig:
+    levels: int = 32
+    distances: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    properties: List[str] = field(default_factory=lambda: [
+        "contrast", "dissimilarity", "homogeneity", "energy", "correlation", "ASM"])
+
+
+@dataclass
 class DecisionTreeConfig:
     max_depth: int = 20
     min_samples_leaf: int = 2
@@ -62,6 +109,14 @@ class SVMConfig:
 
 @dataclass
 class ClassicalMLConfig:
+    feature_sets: List[str] = field(default_factory=lambda: [
+        "hog", "lbp", "glcm", "lbp+glcm", "hog+lbp+glcm"])
+    models: List[str] = field(default_factory=lambda: [
+        "decision_tree", "logreg", "knn", "svm", "random_forest", "xgboost"])
+    cv_folds: int = 5
+    n_jobs: int = 8            # worker processes for the grid searches and feature extraction
+    xgb_device: str = "auto"   # auto | cuda | cpu
+    # Untuned reference settings (kept for the original HOG baselines).
     decision_tree: DecisionTreeConfig = field(default_factory=DecisionTreeConfig)
     svm: SVMConfig = field(default_factory=SVMConfig)
 
@@ -82,6 +137,7 @@ class CNNConfig:
     select_metric: str = "macro_f1"  # macro_f1 | accuracy | loss (checkpoint selection)
     early_stopping_patience: int = 0  # epochs without improvement; 0 disables
     cache_images: bool = True  # keep preprocessed images in memory
+    seeds: List[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
 
 
 @dataclass
@@ -97,6 +153,8 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
     hog: HOGConfig = field(default_factory=HOGConfig)
+    lbp: LBPConfig = field(default_factory=LBPConfig)
+    glcm: GLCMConfig = field(default_factory=GLCMConfig)
     classical_ml: ClassicalMLConfig = field(default_factory=ClassicalMLConfig)
     cnn: CNNConfig = field(default_factory=CNNConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

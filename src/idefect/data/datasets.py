@@ -126,11 +126,11 @@ def pixel_hash(img: np.ndarray) -> str:
 
 
 def find_duplicate_groups(samples: Sequence[Sample]) -> List[List[str]]:
-    """Groups of image paths whose pixels are exactly identical.
+    """Groups of image paths whose pixels are exactly identical (whole image).
 
-    NEU-CLS itself contains such a pair (Pa_101.bmp and Pa_105.bmp), so this
-    matters in practice: if the copies land in different splits, the test set
-    contains an image the model was trained on.
+    This is the cheap exact check used by the dataset audit. The split itself
+    uses the full near-duplicate detector in :mod:`idefect.data.duplicates`,
+    which also finds flipped, rotated, overlapping and re-processed copies.
     """
     by_hash: dict[str, List[str]] = defaultdict(list)
     for path, _ in samples:
@@ -149,15 +149,17 @@ def make_splits(
     seed: int,
     groups: Optional[Sequence[Sequence[str]]] = None,
 ) -> DatasetSplit:
-    """Deterministic **stratified** split.
+    """Deterministic, stratified, group-aware split.
 
-    The split is reproducible for a given ``seed`` and keeps class proportions
-    balanced across train/val/test. Implemented with a per-class shuffle so
-    there is no hard dependency on scikit-learn's splitter here.
+    ``groups`` lists images that must stay together (duplicates, overlapping
+    crops, re-processed copies). Every group is one indivisible unit, so no
+    group can span two splits, even if its members carry different labels.
 
-    ``groups`` lists paths that must stay together (for example exact
-    duplicates). Each group is placed as one unit, so no group spans two
-    splits. Without groups every image is its own unit.
+    Units are stratified by their majority label. Within each class the units
+    are shuffled with ``seed`` and then placed largest first into whichever
+    split is furthest below its target size, which keeps the 70/15/15 (or
+    other) proportions close even when some groups are large. Without groups
+    every image is its own unit and the split is exactly proportional.
     """
     total = train_frac + val_frac + test_frac
     if abs(total - 1.0) > 1e-6:
@@ -168,71 +170,81 @@ def make_splits(
         for p in g:
             group_of[str(p)] = gi
 
+    # Build units globally (a group can mix labels), then stratify.
+    units_by_key: dict = {}
+    for path, label in sorted(samples):
+        gi = group_of.get(str(path))
+        key = ("g", gi) if gi is not None else ("s", str(path))
+        units_by_key.setdefault(key, []).append((path, label))
+    by_class: dict[int, List[List[Sample]]] = {i: [] for i in range(len(class_names))}
+    for unit in units_by_key.values():
+        labels = [y for _, y in unit]
+        majority = max(sorted(set(labels)), key=labels.count)
+        by_class[majority].append(unit)
+
     rng = random.Random(seed)
-    by_class: dict[int, List[Sample]] = {i: [] for i in range(len(class_names))}
-    for path, label in samples:
-        by_class[label].append((path, label))
-
-    train: List[Sample] = []
-    val: List[Sample] = []
-    test: List[Sample] = []
-
+    fracs = (train_frac, val_frac, test_frac)
+    parts: tuple = ([], [], [])
     for label in sorted(by_class):
-        items = sorted(by_class[label])  # deterministic base order
-        units: List[List[Sample]] = []
-        grouped: dict[int, List[Sample]] = {}
-        for item in items:
-            gi = group_of.get(str(item[0]))
-            if gi is None:
-                units.append([item])
-            elif gi in grouped:
-                grouped[gi].append(item)
-            else:
-                grouped[gi] = [item]
-                units.append(grouped[gi])
+        units = sorted(by_class[label])
         rng.shuffle(units)
-        n = len(items)
-        n_train = min(int(round(n * train_frac)), n)
-        n_val = min(int(round(n * val_frac)), n - n_train)
-        got_train = got_val = 0
+        units.sort(key=len, reverse=True)  # stable: equal sizes keep shuffled order
+        n = sum(len(u) for u in units)
+        targets = [n * f for f in fracs]
+        filled = [0, 0, 0]
         for unit in units:
-            if got_train < n_train:
-                train.extend(unit)
-                got_train += len(unit)
-            elif got_val < n_val:
-                val.extend(unit)
-                got_val += len(unit)
-            else:
-                test.extend(unit)
+            deficits = [targets[i] - filled[i] for i in range(3)]
+            dest = max(range(3), key=lambda i: (deficits[i], -i))
+            parts[dest].extend(unit)
+            filled[dest] += len(unit)
 
-    # Shuffle the concatenated splits so classes are interleaved.
+    train, val, test = (list(p) for p in parts)
     rng.shuffle(train)
     rng.shuffle(val)
     rng.shuffle(test)
-
-    return DatasetSplit(
-        train=train,
-        val=val,
-        test=test,
-        class_names=list(class_names),
-    )
+    return DatasetSplit(train=train, val=val, test=test, class_names=list(class_names))
 
 
-def build_split(cfg) -> Tuple[List[Sample], List[str], DatasetSplit, List[List[str]]]:
+def duplicate_report(cfg, samples: Sequence[Sample], verbose: bool = False, cache_only: bool = False):
+    """Run (or load from cache) the near-duplicate detector for ``samples``."""
+    from idefect.data.duplicates import detect_duplicates
+
+    return detect_duplicates([p for p, _ in samples], cfg.data.duplicates, use_cache=True,
+                             verbose=verbose, cache_only=cache_only)
+
+
+def build_split(cfg, verbose: bool = False,
+                cache_only: bool = False) -> Tuple[List[Sample], List[str], DatasetSplit, List[List[str]]]:
     """Scan the dataset in ``cfg.data.root`` and build the shared split.
 
     Every branch (classical, CNN, dataset report) calls this, so all of them
-    see exactly the same train/val/test partition. Returns
-    ``(samples, class_names, split, duplicate_groups)``.
+    see exactly the same train/val/test partition. Near-duplicate groups (see
+    :mod:`idefect.data.duplicates`) are kept inside one split. The detector's
+    result is cached, so only the first call pays for it; with ``cache_only``
+    a missing cache raises ``DuplicateCacheMissing`` instead of running the
+    detection. Returns ``(samples, class_names, split, duplicate_groups)``.
     """
+    if getattr(cfg.data, "manifest", ""):
+        from idefect.data.stats import verify_manifest
+
+        m = verify_manifest(cfg.data.root, cfg.data.manifest)
+        if m.get("checked") and (m["missing"] or m["modified"] or m["unexpected"]):
+            raise RuntimeError(
+                f"Dataset in {cfg.data.root} does not match {cfg.data.manifest}: "
+                f"missing={m['missing'][:5]} modified={m['modified'][:5]} "
+                f"unexpected={m['unexpected'][:5]}. Restore the original files "
+                "(see data/README.md) or set data.manifest to '' for a different dataset."
+            )
     samples, class_names = load_samples(cfg.data.root)
-    dup_groups = find_duplicate_groups(samples) if cfg.data.group_duplicates else []
+    groups: List[List[str]] = []
+    if cfg.data.duplicates.enabled:
+        groups = duplicate_report(cfg, samples, verbose=verbose, cache_only=cache_only).groups
     split = make_splits(
         samples, class_names,
         cfg.data.train_frac, cfg.data.val_frac, cfg.data.test_frac,
-        cfg.seed, groups=dup_groups,
+        cfg.data.split_seed, groups=groups,
     )
-    return samples, class_names, split, dup_groups
+    return samples, class_names, split, groups
 
 
 def load_split_arrays(

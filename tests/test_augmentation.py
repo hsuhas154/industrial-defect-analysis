@@ -30,7 +30,8 @@ def test_augmentations_differ_across_epochs_with_workers(dummy_dataset):
     gen = torch.Generator()
     gen.manual_seed(0)
     dl = DataLoader(ds, batch_size=8, shuffle=False, num_workers=2,
-                    worker_init_fn=seed_worker, generator=gen)
+                    worker_init_fn=seed_worker, generator=gen,
+                    multiprocessing_context="forkserver")
     epoch1 = next(iter(dl))[0]
     epoch2 = next(iter(dl))[0]
     assert not torch.equal(epoch1, epoch2), "augmentation repeated across epochs"

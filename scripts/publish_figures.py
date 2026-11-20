@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """Copy the key result figures into docs/figures for the README.
 
-Figures are downscaled and, when they contain no colour, stored as
-single-channel PNGs so the committed copies stay small.
+Figures are copied byte for byte at full resolution.
 
 Usage:
     python scripts/publish_figures.py --config configs/neu_baseline.yaml
 """
 
 import argparse
+import shutil
 from pathlib import Path
-
-import numpy as np
-from PIL import Image
 
 import _bootstrap  # noqa: F401
 
@@ -22,24 +19,31 @@ KEY_FIGURES = [
     "model_comparison.png",
     "eda/samples_by_class.png",
     "eda/preprocessing_comparison.png",
+    "duplicates/group_sizes.png",
+    "duplicates/same_pixel_identical.png",
+    "duplicates/same_grain_weakest.png",
+    "duplicates/distinct_closest.png",
+    "classical/grid_cv_macro_f1.png",
+    "classical/grid_test_macro_f1.png",
+    "classical/feature_projections.png",
+    "classical/lbp_codes_and_histograms.png",
+    "classical/glcm_distributions.png",
+    "classical/decision_tree_depth_curve.png",
+    "classical/ablation_preprocessing.png",
+    "classical/ablation_resolution.png",
+    "classical/ablation_hog.png",
+    "classical/importances_*.png",
+    "roc_pr/*.png",
     "custom_cnn_confusion_matrix.png",
     "custom_cnn_training_curves.png",
-    "hog+svm_confusion_matrix.png",
-    "errors/hog+svm_misclassified.png",
-    "errors/custom_cnn_misclassified.png",
-    "hog_example.png",
+    "*_confusion_matrix.png",
+    "errors/*_misclassified.png",
 ]
 
 
-def publish(src: Path, dst: Path, max_width: int = 1400) -> int:
-    im = Image.open(src).convert("RGB")
-    if im.width > max_width:
-        im = im.resize((max_width, round(im.height * max_width / im.width)), Image.LANCZOS)
-    arr = np.asarray(im)
-    if np.array_equal(arr[..., 0], arr[..., 1]) and np.array_equal(arr[..., 1], arr[..., 2]):
-        im = im.convert("L")
+def publish(src: Path, dst: Path) -> int:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    im.save(dst, optimize=True)
+    shutil.copyfile(src, dst)
     return dst.stat().st_size
 
 
@@ -49,13 +53,17 @@ def main() -> None:
     p.add_argument("--out", default="docs/figures")
     args = p.parse_args()
     fig_dir = Path(load_config(args.config).output.figures_dir)
+    seen = set()
     for rel in KEY_FIGURES:
-        src = fig_dir / rel
-        if not src.exists():
-            print(f"[skip] {src} (not generated yet)")
-            continue
-        size = publish(src, Path(args.out) / Path(rel).name)
-        print(f"[ok] {Path(args.out) / Path(rel).name} ({size / 1024:.0f} KB)")
+        matches = sorted(fig_dir.glob(rel))
+        if not matches:
+            print(f"[skip] {fig_dir / rel} (not generated yet)")
+        for src in matches:
+            if src in seen:
+                continue
+            seen.add(src)
+            size = publish(src, Path(args.out) / src.name)
+            print(f"[ok] {Path(args.out) / src.name} ({size / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":

@@ -9,28 +9,72 @@ it; results are in [`experiments.md`](experiments.md).
 ## Two parallel branches
 
 ```
-NEU → preprocessing → HOG → { Decision Tree, SVM } → classification
-NEU → preprocessing → custom CNN                   → classification
+NEU → preprocessing → { HOG, LBP, GLCM } → { DT, LogReg, k-NN, SVM, RF, XGBoost } → classification
+NEU → preprocessing → custom CNN                                                → classification
 ```
 
-Both branches use the **same deterministic train/validation/test split**, the
-same preprocessing configuration and the same metrics, so differences in the
-results come from the representation and the classifier, not from the data.
+Both branches use the **same deterministic, group-aware train/validation/test
+split**, the same preprocessing configuration and the same metrics, so
+differences in the results come from the representation and the classifier,
+not from the data.
 
-## Stage A: data ingestion, auditing and preprocessing
+## Stage A: data ingestion, integrity, leakage control and preprocessing
 
 **Discovery.** `idefect.data.datasets` accepts class sub-folders or the flat
 NEU-CLS layout, where the two-letter filename prefix (`Cr`, `In`, `Pa`, `PS`,
 `RS`, `Sc`) gives the class.
 
-**Auditing.** `idefect.data.stats` reads every image once and checks sizes,
-channel counts, data types, unreadable files, class balance and **exact
-duplicates** (hash of decoded pixels). NEU-CLS contains one duplicate pair.
+**Integrity.** `data/neu_cls_manifest.sha256` stores the SHA-256 of every
+image. Every run verifies it and refuses to continue if a file is missing,
+altered or unexpected (an image viewer that re-saves a file would otherwise
+change results silently).
 
-**Splitting.** A per-class shuffle with a fixed seed gives a stratified 70/15/15
-split that is identical across runs and across both branches. Duplicate groups
-are treated as one unit, so a duplicated image can never sit in both train and
-test (which would leak information and inflate test scores).
+**Auditing.** `idefect.data.stats` reads every image once and checks sizes,
+channel counts, data types, unreadable files and class balance.
+
+**Near-duplicate detection** (`idefect.data.duplicates`). Leakage happens when
+the same visual content sits on both sides of a split, and NEU-CLS turns out to
+be built largely from overlapping crops: most images share an exact region with
+at least one other image, often flipped or rotated, and some re-processed
+copies exist too. Simple similarity scores cannot separate copies from
+look-alikes here, because different crops along one long scratch correlate at
+0.998 while a JPEG copy can fall to 0.86. The detector therefore decides on two
+pieces of evidence that a different image cannot fake:
+
+* **E1, pixel identity.** At the best alignment over the 8 flips/rotations and
+  all shifts, at least 99 percent of the overlapping pixels agree within 2 grey
+  levels. Real overlaps agree on 100 percent of pixels; all other pairs never
+  exceed 74 percent. To find *every* exact overlap, short horizontal pixel runs
+  of each image (and of each flipped/rotated version) are hashed; matching runs
+  vote for an alignment, so any shared textured region a few pixels high is
+  found.
+* **E2, shared background grain.** For re-processed copies (brightness,
+  contrast, resampling, mild compression) the fine grain of the steel surface
+  away from strong structures is the fingerprint. The overlap is band-passed,
+  lines, edges and saturated pixels are masked with a wide margin, and the
+  median per-tile normalized cross-correlation is computed over tiles that are
+  mostly background. Candidates come from each image's 10 best partners in a
+  GPU search of masked cross-correlation over all pairs, shifts and
+  transforms. Thresholds were calibrated on NEU: pairs from different classes
+  that share no pixels never exceed 0.32 and no pair judged distinct exceeds
+  0.385, while pixel-identical pairs (copies by construction) score 1.0 and
+  planted re-processed copies down to JPEG quality 50 score 0.54 or more; the
+  rule is same at 0.50 or more, human review in [0.40, 0.50), distinct below.
+
+Pairs without enough background to judge and without pixel identity are kept
+apart and listed. Human decisions live in `configs/duplicate_review.yaml` and
+override the detector. Groups are connected components of the "same" relation
+(union-find), so chains of overlapping crops stay together. The method is
+covered by tests with planted copies (exact, rotated, flipped, brightened,
+JPEG, resampled, overlapping crops) and planted look-alikes (same bright line,
+different surface).
+
+**Splitting.** Every group is one indivisible unit, even when its members have
+different labels (some inclusion and scratch crops share exact regions).
+Units are stratified by majority label, shuffled with a fixed seed and placed
+largest first into whichever split is furthest below its target, which keeps
+70/15/15 per class while no group spans two splits. The split seed is separate
+from the training seed, so all models and all training seeds share one split.
 
 **Preprocessing** (`idefect.data.preprocessing`, all configurable):
 
@@ -42,8 +86,8 @@ test (which would leak information and inflate test scores).
   towards one edge), which a single global adjustment cannot correct;
 * optional Gaussian or median denoising. Median filtering removes impulse noise
   while preserving edges better than a Gaussian, but both erode fine structure
-  such as the crazing network, so denoising is off by default and treated as an
-  experiment rather than an assumption;
+  such as the crazing network, so denoising is off by default and evaluated in
+  the preprocessing ablation;
 * scaling to [0, 1].
 
 **Classical CV operations** (`idefect.data.cv_ops`) are used for analysis and as
@@ -54,40 +98,72 @@ remove small specks or fill gaps; top-hat and black-hat to isolate small bright
 and dark details such as inclusions and pits), Otsu thresholding and intensity
 histograms.
 
-## Stage B: handcrafted features (HOG)
+## Stage B: handcrafted features
 
-Histogram of Oriented Gradients (`idefect.features.hog`):
+Every extractor is a pure function of one preprocessed image with no fitted
+state, so features can be computed for the whole dataset up front without
+leaking anything; anything learned from data is fitted later, per
+cross-validation fold.
 
-1. compute image gradients and their orientation;
-2. in each 16x16-pixel cell, build a 9-bin histogram of orientations weighted by
-   gradient magnitude;
-3. normalize groups of 2x2 cells (blocks, overlapping) with L2-Hys, which makes
-   the descriptor robust to local illumination and contrast changes;
-4. concatenate: on a 128x128 input this gives 7 x 7 blocks x 4 cells x 9 bins =
-   **1,764 features**.
+**HOG** (`idefect.features.hog`): image gradients, a 9-bin orientation
+histogram per 16x16 cell weighted by gradient magnitude, L2-Hys normalization
+over overlapping 2x2-cell blocks (robust to local illumination), concatenated:
+7 x 7 blocks x 4 cells x 9 bins = **1,764 features** at 128x128. HOG encodes
+edge structure: scratches are long oriented edges, crazing a network of short
+edges, rolled-in scale oriented streaks. Its weakness is intensity texture
+without strong edges (soft blobs, fine pitting).
 
-*Why HOG for surface defects?* Many defects are fundamentally gradient
-phenomena: scratches are long, consistently oriented edges, crazing is a dense
-network of short edges in many orientations, rolled-in scale produces oriented
-streaks. HOG encodes exactly this local edge structure. Its known weakness is
-intensity texture without strong edges (soft blobs, fine pitting), which is why
-texture descriptors (LBP, GLCM) are the next experiment.
+**LBP** (`idefect.features.lbp`): each pixel's P neighbours on a circle of
+radius R are thresholded against the centre, giving a P-bit pattern. With the
+rotation-invariant uniform mapping, patterns with at most two 0/1 transitions
+(spots, edges, corners, flat areas) are reduced to their number of set bits,
+and all other patterns share one bin: P + 2 codes. The normalized histogram of
+codes at (8, 1), (16, 2) and (24, 3) gives **54 features**. LBP captures
+micro-texture, ignores monotonic brightness changes and is rotation invariant.
+
+**GLCM** (`idefect.features.glcm`): after quantization to 32 grey levels, the
+grey-level co-occurrence matrix counts how often level i neighbours level j at
+distance d and angle theta (0, 45, 90, 135 degrees). Six statistics are taken:
+contrast `sum P(i,j)(i-j)^2`, dissimilarity `sum P(i,j)|i-j|`, homogeneity
+`sum P(i,j)/(1+(i-j)^2)`, energy `sqrt(ASM)`, ASM `sum P(i,j)^2` and correlation.
+For d in {1, 2, 4, 8}, the mean over angles (rotation invariant) and the range
+over angles (directionality, high for streaks and scratches) give **48
+features**.
+
+**Feature sets.** Descriptors are first evaluated alone, and concatenated only
+afterwards (LBP + GLCM, HOG + LBP + GLCM), as the project plan requires.
 
 ## Stage C: classical machine learning
 
 * **Decision Tree** (CART): recursively chooses the single feature and threshold
-  that most reduce Gini impurity, `G = 1 - sum_k p_k^2`. It is interpretable and
-  non-linear, but each split looks at one feature, so on high-dimensional,
-  correlated features a deep tree fits noise (high variance). It is kept as the
-  reference point for that overfitting behaviour and for the ensembles
-  (Random Forest reduces variance by bagging, XGBoost reduces bias by boosting).
-* **SVM with RBF kernel**: maximizes the margin between classes, with `C`
-  trading margin width against training errors. The RBF kernel
-  `k(x, x') = exp(-gamma ||x - x'||^2)` gives a non-linear boundary without
-  computing an explicit feature map. Because it is distance-based, features are
-  standardized first (`StandardScaler`); otherwise high-variance bins dominate.
-  Multi-class is handled one-versus-one; probabilities come from Platt scaling
-  (used for ROC-AUC and the demo's confidences).
+  that most reduce Gini impurity `1 - sum_k p_k^2` (or entropy). Interpretable
+  and non-linear, but one feature per split, so a deep tree on many correlated
+  features fits noise (high variance); depth, leaf size and cost-complexity
+  pruning are tuned and the depth curve shows the overfitting directly.
+* **Logistic regression** (multinomial, L2): a linear baseline; C is tuned.
+* **k-NN**: an instance-based baseline on standardized features; k, distance
+  weighting and metric are tuned.
+* **SVM**: maximizes the margin between classes, C trading margin width against
+  training errors. The RBF kernel `exp(-gamma ||x - x'||^2)` gives non-linear
+  boundaries without an explicit feature map; a linear kernel is also searched.
+  Features are standardized because the method is distance based.
+* **Random Forest**: many decorrelated trees (bootstrap samples, random feature
+  subsets per split) averaged, which reduces variance relative to a single
+  tree.
+* **XGBoost**: gradient-boosted trees fitted sequentially to the residual
+  gradient of the loss with shrinkage and regularization, which reduces bias;
+  trained on the GPU (`device="cuda"`).
+
+**Tuning protocol (leakage-free).** For every (feature set, classifier) pair,
+hyperparameters are chosen by grid search with 5-fold *stratified group*
+cross-validation on the training split: near-duplicate groups never straddle a
+fold, and scalers live inside the pipeline so they are refitted on each fold's
+training part. The chosen configuration is refitted on the whole training
+split. Each classifier's final feature set is the one with the best mean CV
+macro-F1. The validation split is a second, independent check; the test split
+is evaluated once and never used for any decision. Grid searches run in parallel on all CPU threads (`classical_ml.n_jobs`), XGBoost
+on the GPU; search and fit times are recorded. Parallelism changes only speed and
+memory, never results: every fit is independent and seeded.
 
 ## Stage D: custom CNN
 
@@ -121,6 +197,12 @@ input 1x128x128
   epoch sees new augmentations and the run remains reproducible.
 * **Checkpoint selection:** the epoch with the best validation macro-F1 is kept;
   the test split is used once, at the end.
+* **Training length:** chosen by a separate study (several epoch budgets x
+  several seeds) on validation macro-F1 only.
+* **Seeds:** the CNN is trained once per seed (five seeds) on the same split.
+  The model kept as the artifact is the seed with the best *validation*
+  macro-F1; test macro-F1 is reported for it and as mean and standard deviation
+  over all seeds, so a lucky seed cannot pass as the result.
 
 ## Evaluation
 

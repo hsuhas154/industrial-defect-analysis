@@ -12,15 +12,29 @@ data:
   #   1. Class sub-folders:   <root>/<class_name>/*.bmp
   #   2. Flat NEU-CLS layout: <root>/Cr_1.bmp, In_1.bmp, ...  (prefix -> class)
   root: "data/raw/NEU-CLS"
+  manifest: "data/neu_cls_manifest.sha256"   # integrity check of every image (sha256sum format)
   image_size: 128          # images are resized to image_size x image_size
   grayscale: true
   # Deterministic stratified split (fractions must sum to 1.0)
   train_frac: 0.70
   val_frac: 0.15
   test_frac: 0.15
-  # NEU-CLS contains exact duplicates (Pa_101.bmp == Pa_105.bmp). Keeping each
-  # duplicate group inside one split prevents train/test leakage.
-  group_duplicates: true
+  split_seed: 42           # fixed: every model and every training seed shares one split
+  # Leakage control: images that share visual content are kept in one split.
+  # See src/idefect/data/duplicates.py and docs/methodology.md for the method
+  # and its calibration. Pairs needing a human decision go in review_file.
+  duplicates:
+    enabled: true
+    exact_tolerance: 2       # E1: grey levels allowed between "identical" pixels
+    exact_fraction: 0.99     # E1: share of overlap pixels that must agree
+    min_exact_overlap_px: 1024
+    top_k: 10                # E2: correlation partners verified per image
+    min_overlap: 0.25        # E2: minimum overlap (fraction of the image)
+    grain_same: 0.50         # E2: background-grain score that proves a copy
+    grain_review: 0.40       # E2: scores in [0.40, 0.50) go to human review
+    grain_min_tiles: 12
+    review_file: "configs/duplicate_review.yaml"
+    cache_dir: "experiments/cache"
 
 preprocessing:
   normalize: true          # scale pixel intensities to [0, 1]
@@ -37,7 +51,27 @@ hog:
   block_norm: "L2-Hys"
   transform_sqrt: true
 
+lbp:
+  points_radii: [[8, 1], [16, 2], [24, 3]]   # (neighbours P, radius R) per scale
+  method: "uniform"        # rotation-invariant uniform patterns: P + 2 codes per scale
+  grid: 1                  # 1 = one global histogram per scale
+
+glcm:
+  levels: 32               # grey levels after quantization
+  distances: [1, 2, 4, 8]  # pixel offsets; angles 0/45/90/135 are always used
+  properties: ["contrast", "dissimilarity", "homogeneity", "energy", "correlation", "ASM"]
+
 classical_ml:
+  # Every feature set is paired with every model; hyperparameters are tuned by
+  # stratified group k-fold CV on the training split (search spaces in
+  # src/idefect/classical_ml/models.py). Each model's final feature set is the
+  # one with the best CV macro-F1; the test split is never used for choices.
+  feature_sets: ["hog", "lbp", "glcm", "lbp+glcm", "hog+lbp+glcm"]
+  models: ["decision_tree", "logreg", "knn", "svm", "random_forest", "xgboost"]
+  cv_folds: 5
+  n_jobs: -1               # worker processes for the searches: -1 = all 32 CPU threads (8 is the low-memory option)
+  xgb_device: "auto"       # XGBoost on the GPU when CUDA is available
+  # Untuned reference settings of the original HOG baselines.
   decision_tree:
     max_depth: 20
     min_samples_leaf: 2
@@ -52,7 +86,8 @@ cnn:
   in_channels: 1
   base_channels: 32        # channel width of the first conv block
   dropout: 0.3
-  epochs: 40               # chosen on validation macro-F1 (20 epochs was still improving)
+  epochs: 150              # chosen by scripts/cnn_epoch_study.py on validation macro-F1 only
+                           # (40: 0.9589, 80: 0.9734, 150: 0.9794; 3 seeds each)
   batch_size: 64
   lr: 0.001
   weight_decay: 0.0001
@@ -63,6 +98,7 @@ cnn:
   select_metric: "macro_f1" # checkpoint kept by best validation macro_f1 | accuracy | loss
   early_stopping_patience: 0  # stop after N epochs without improvement; 0 disables
   cache_images: true       # preprocess once and keep in memory (about 30 MB for NEU)
+  seeds: [42, 43, 44, 45, 46]  # one run per seed on the same split; mean and std reported
 
 output:
   results_dir: "experiments/results"

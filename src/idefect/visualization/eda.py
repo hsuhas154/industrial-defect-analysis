@@ -19,7 +19,7 @@ import numpy as np
 from idefect.data import cv_ops
 from idefect.data.datasets import Sample
 from idefect.data.preprocessing import apply_clahe, denoise, load_grayscale, resize
-from idefect.visualization.plots import _ensure_parent, plt
+from idefect.visualization.plots import _ensure_parent, plt, tidy
 
 
 def _by_class(samples: Sequence[Sample], n_classes: int) -> Dict[int, List[str]]:
@@ -41,7 +41,7 @@ def plot_class_balance(counts: Dict[str, int], out_path: str | Path) -> Path:
     ax.set(ylabel="images", title="Images per class")
     plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -70,7 +70,7 @@ def plot_samples_by_class(
                 ax.imshow(load_grayscale(picks[c]), cmap="gray", vmin=0, vmax=255)
         axes[r, 0].set_title(class_names[r], fontsize=9, loc="left")
     fig.suptitle("Sample images by class")
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -127,7 +127,7 @@ def plot_preprocessing_comparison(
             if c == 0:
                 ax.set_ylabel(class_names[r], fontsize=8)
     fig.suptitle("Preprocessing and classical CV operations")
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -154,7 +154,7 @@ def plot_intensity_histograms(
            title="Mean intensity histogram per class")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -178,7 +178,7 @@ def plot_class_mean_images(
         axes[i].set_title(name, fontsize=8)
         axes[i].axis("off")
     fig.suptitle("Mean image per class (each panel contrast-stretched)")
-    fig.tight_layout()
+    tidy(fig)
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

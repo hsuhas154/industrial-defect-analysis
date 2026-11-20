@@ -1,0 +1,21 @@
+# Human decisions for image pairs the near-duplicate detector cannot settle on
+# its own. Entries override the detector. Use file names, not full paths.
+#
+#   same:      pairs to keep in one split (detector missed or was unsure)
+#   distinct:  pairs that are genuinely different images (detector was unsure)
+#
+# The dataset report lists every pair awaiting review together with an
+# aligned side-by-side figure (experiments/figures/duplicates/review_pairs.png).
+same:
+  - [In_59.bmp, In_96.bmp]
+  - [In_109.bmp, In_156.bmp]
+  - [In_111.bmp, In_156.bmp]
+  - [In_112.bmp, In_156.bmp]
+  - [In_113.bmp, In_156.bmp]
+  - [In_111.bmp, In_167.bmp]
+  - [In_112.bmp, In_167.bmp]
+  - [In_169.bmp, In_194.bmp]
+distinct:
+  - [Sc_103.bmp, Sc_288.bmp]
+  - [Sc_50.bmp, Sc_53.bmp]
+  - [Sc_275.bmp, Sc_37.bmp]
