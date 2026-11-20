@@ -252,11 +252,19 @@ macro-F1.
 
 | Preprocessing | HOG SVM | LBP SVM | GLCM SVM | LBP + GLCM SVM | LBP + GLCM LogReg |
 |---|---|---|---|---|---|
-| resize only | 0.867 | **0.936** | **0.960** | 0.962 | 0.955 |
+| resize only | 0.867 | 0.936 | **0.960** | 0.962 | 0.955 |
 | CLAHE (default) | 0.827 | 0.930 | 0.953 | **0.969** | **0.959** |
 | CLAHE + median 3 | 0.823 | 0.907 | 0.944 | 0.940 | 0.933 |
 | CLAHE + Gaussian 3 | 0.829 | 0.915 | 0.939 | 0.943 | 0.939 |
 | median 3 only | **0.876** | 0.921 | 0.945 | 0.962 | 0.954 |
+| CLAHE + Sobel edges | 0.763 | 0.883 | 0.905 | 0.947 | 0.945 |
+| CLAHE + top/black-hat | 0.804 | **0.954** | 0.943 | 0.963 | 0.945 |
+
+The last two rows test edge and morphology operations as model input:
+"Sobel edges" replaces the image by its Sobel gradient magnitude;
+"top/black-hat" is morphological contrast enhancement (image + top-hat -
+black-hat, 9x9 elliptical element), which sharpens small bright details such
+as inclusions and small dark ones such as pits.
 
 * **Denoising after CLAHE hurts LBP and LBP + GLCM** by 0.015 to 0.051:
   blurring erases the micro-texture LBP measures. GLCM changes by at most
@@ -268,6 +276,24 @@ macro-F1.
   kept as the default because it never hurts the chosen features. For LBP or
   GLCM alone, CLAHE changes the score by -0.010 to +0.013 (SVM and logistic
   regression), also within noise.
+* **An edge map as input hurts every descriptor and classifier**, by 0.014 to
+  0.064 against CLAHE alone: the gradient magnitude discards the intensity
+  texture that LBP and GLCM measure, and HOG of an edge map describes
+  second derivatives, which are mostly noise.
+* **Morphological enhancement helps only LBP with an SVM** (+0.024, the best
+  LBP score among the preprocessing variants, but within its fold standard
+  deviation of 0.043) and costs 0.006 to 0.024 everywhere else, including
+  the final LBP + GLCM features. For HOG it also makes the folds unstable
+  (standard deviation 0.083 for the SVM).
+* Edge detection and morphology are therefore useful here for *analysis*
+  (they show why patches defeat gradient features, notebook 01), not as
+  classifier input; neither replaces CLAHE as the default.
+* Reproducibility: this ablation was re-run (8 instead of 32 worker
+  processes) to add the last two rows. 39 of the 40 earlier rows came out
+  identical to every digit; one (HOG + logistic regression after CLAHE +
+  Gaussian) moved by 0.0003, a floating-point summation-order effect of the
+  different thread layout, with identical validation score and
+  hyperparameters.
 
 **Resolution** (CLAHE):
 

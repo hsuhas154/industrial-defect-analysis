@@ -66,6 +66,8 @@ class PreprocessingConfig:
     clahe_tile_grid: int = 8
     denoise: str = "none"  # none | gaussian | median
     denoise_ksize: int = 3
+    enhance: str = "none"  # none | sobel | tophat (edge or morphology enhanced input)
+    enhance_ksize: int = 9  # structuring element size for tophat
 
 
 @dataclass
@@ -210,6 +212,8 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "preprocessing.denoise must be one of none|gaussian|median"
         )
+    if cfg.preprocessing.enhance not in {"none", "sobel", "tophat"}:
+        raise ValueError("preprocessing.enhance must be one of none|sobel|tophat")
     if cfg.cnn.scheduler not in {"cosine", "plateau", "none"}:
         raise ValueError("cnn.scheduler must be one of cosine|plateau|none")
     if cfg.cnn.select_metric not in {"macro_f1", "accuracy", "loss"}:

@@ -1,8 +1,9 @@
 """Classical-branch ablations.
 
-1. Preprocessing: does contrast enhancement or denoising help handcrafted
-   features? Variants: plain resize, CLAHE (the default), CLAHE + median,
-   CLAHE + Gaussian, median only.
+1. Preprocessing: does contrast enhancement, denoising, or edge or
+   morphology enhanced input help handcrafted features? Variants: plain
+   resize, CLAHE (the default), CLAHE + median, CLAHE + Gaussian, median
+   only, CLAHE + Sobel edge map, CLAHE + top-hat/black-hat enhancement.
 2. Resolution: 64, 128 and 200 pixels (200 is native NEU).
 3. HOG parameters: cell size, orientation bins, block size, normalization.
 
@@ -18,7 +19,7 @@ import copy
 import json
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 from sklearn.metrics import f1_score
@@ -34,6 +35,8 @@ PREPROCESSING_VARIANTS = {
     "CLAHE + median 3": dict(clahe=True, denoise="median", denoise_ksize=3),
     "CLAHE + Gaussian 3": dict(clahe=True, denoise="gaussian", denoise_ksize=3),
     "median 3 only": dict(clahe=False, denoise="median", denoise_ksize=3),
+    "CLAHE + Sobel edges": dict(clahe=True, denoise="none", enhance="sobel"),
+    "CLAHE + top/black-hat": dict(clahe=True, denoise="none", enhance="tophat", enhance_ksize=9),
 }
 
 HOG_VARIANTS = [
@@ -72,23 +75,23 @@ def _evaluate(cfg: Config, split, g_train, feature_set: str, models: List[str], 
 
 
 def run_ablations(cfg: Config, feature_sets: List[str], models: List[str],
-                  hog_models: List[str], out_dir: Path) -> Dict[str, List[Dict]]:
+                  hog_models: List[str], out_dir: Path,
+                  kinds: Sequence[str] = ("preprocessing", "resolution", "hog")) -> Dict[str, List[Dict]]:
+    """Run the selected ablations; only their JSON files are rewritten."""
     out_dir.mkdir(parents=True, exist_ok=True)
     _, _, split, groups = build_split(cfg)
     g_train = group_ids(split.train, groups)
-    results: Dict[str, List[Dict]] = {"preprocessing": [], "resolution": [], "hog": []}
+    results: Dict[str, List[Dict]] = {k: [] for k in kinds}
 
     t0 = time.time()
-    print("[ablation] preprocessing")
-    for name, kw in PREPROCESSING_VARIANTS.items():
+    for name, kw in PREPROCESSING_VARIANTS.items() if "preprocessing" in kinds else ():
         c = copy.deepcopy(cfg)
         for k, v in kw.items():
             setattr(c.preprocessing, k, v)
         for fs in feature_sets:
             results["preprocessing"] += _evaluate(c, split, g_train, fs, models, {"preprocessing": name})
 
-    print("[ablation] resolution")
-    for size in (64, 128, 200):
+    for size in (64, 128, 200) if "resolution" in kinds else ():
         c = copy.deepcopy(cfg)
         c.data.image_size = size
         if size == 64:
@@ -98,8 +101,7 @@ def run_ablations(cfg: Config, feature_sets: List[str], models: List[str],
         for fs in feature_sets:
             results["resolution"] += _evaluate(c, split, g_train, fs, models, {"image_size": size})
 
-    print("[ablation] HOG parameters")
-    for hv in HOG_VARIANTS:
+    for hv in HOG_VARIANTS if "hog" in kinds else ():
         c = copy.deepcopy(cfg)
         for k, v in hv.items():
             setattr(c.hog, k, v)

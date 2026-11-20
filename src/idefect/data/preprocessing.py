@@ -49,6 +49,29 @@ def denoise(img: np.ndarray, method: str, ksize: int) -> np.ndarray:
     raise ValueError(f"unknown denoise method: {method}")
 
 
+def enhance(img: np.ndarray, method: str, ksize: int = 9) -> np.ndarray:
+    """Optional edge or morphology enhanced input (uint8 in, uint8 out).
+
+    * ``sobel``: the Sobel gradient magnitude replaces the image, so a model
+      sees an edge map instead of intensities;
+    * ``tophat``: morphological contrast enhancement, image + top-hat - black-hat
+      with a ``ksize`` elliptical element, which sharpens small bright details
+      (inclusions) and small dark details (pits) while keeping the image.
+    """
+    if method == "none":
+        return img
+    if method == "sobel":
+        from idefect.data.cv_ops import sobel_magnitude
+
+        return sobel_magnitude(img, ksize=3)
+    if method == "tophat":
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        top = cv2.morphologyEx(img, cv2.MORPH_TOPHAT, kernel).astype(np.int16)
+        black = cv2.morphologyEx(img, cv2.MORPH_BLACKHAT, kernel).astype(np.int16)
+        return np.clip(img.astype(np.int16) + top - black, 0, 255).astype(np.uint8)
+    raise ValueError(f"unknown enhance method: {method}")
+
+
 def preprocess_image(
     img: np.ndarray,
     cfg: PreprocessingConfig,
@@ -73,6 +96,8 @@ def preprocess_image(
         img = apply_clahe(img, cfg.clahe_clip_limit, cfg.clahe_tile_grid)
 
     img = denoise(img, cfg.denoise, cfg.denoise_ksize)
+    # getattr: configs pickled inside models trained before this option existed
+    img = enhance(img, getattr(cfg, "enhance", "none"), getattr(cfg, "enhance_ksize", 9))
 
     out = img.astype(np.float32)
     if cfg.normalize:

@@ -88,15 +88,19 @@ from the training seed, so all models and all training seeds share one split.
   while preserving edges better than a Gaussian, but both erode fine structure
   such as the crazing network, so denoising is off by default and evaluated in
   the preprocessing ablation;
+* optional edge or morphology enhanced input, also off by default and
+  evaluated in the ablation: the Sobel gradient magnitude in place of the
+  image, or morphological contrast enhancement (image + top-hat - black-hat);
 * scaling to [0, 1].
 
-**Classical CV operations** (`idefect.data.cv_ops`) are used for analysis and as
-candidate inputs: Sobel gradient magnitude and the Laplacian (first and second
-derivative edges), Canny (gradient, non-maximum suppression, hysteresis
-thresholds set from the median intensity), morphology (opening and closing to
-remove small specks or fill gaps; top-hat and black-hat to isolate small bright
-and dark details such as inclusions and pits), Otsu thresholding and intensity
-histograms.
+**Classical CV operations** (`idefect.data.cv_ops`): Sobel gradient
+magnitude and the Laplacian (first and second derivative edges), Canny
+(gradient, non-maximum suppression, hysteresis thresholds set from the median
+intensity), morphology (opening and closing to remove small specks or fill
+gaps; top-hat and black-hat to isolate small bright and dark details such as
+inclusions and pits), Otsu thresholding and intensity histograms. They are used
+for analysis (notebook 01), and the Sobel magnitude and top-hat/black-hat
+enhancement are also tested as model input in the preprocessing ablation.
 
 ## Stage B: handcrafted features
 

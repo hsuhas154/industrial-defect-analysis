@@ -58,7 +58,8 @@ ROC-AUC, per-class scores and a confusion matrix.
   the 87 test errors across all models.
 * **Preprocessing is descriptor-specific.** CLAHE costs HOG 0.04 to 0.05 and
   is within noise for texture features; denoising erases the micro-texture
-  LBP depends on (up to 0.05).
+  LBP depends on (up to 0.05), and an edge map as input hurts every
+  descriptor (0.01 to 0.06).
 * *Caveat:* one test image is 0.37 percentage points, so differences of one
   or two images are within noise.
 
@@ -274,7 +275,9 @@ stratification, group handling across classes), the near-duplicate detector
 (planted exact, rotated, flipped, re-processed and overlapping copies must be
 grouped; look-alikes must not), the dataset manifest, HOG, metrics and ROC-AUC,
 prediction export, the comparison table, augmentation randomness, and
-end-to-end training, inference and the Streamlit app.
+end-to-end training, inference and the Streamlit app, plus a check that every
+fitted step (scalers, classifiers, CNN updates, input-check statistics) sees
+training images only.
 
 ## Roadmap
 

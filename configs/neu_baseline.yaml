@@ -43,6 +43,8 @@ preprocessing:
   clahe_tile_grid: 8
   denoise: "none"          # one of: none | gaussian | median
   denoise_ksize: 3
+  enhance: "none"          # one of: none | sobel (edge map) | tophat (morphological contrast)
+  enhance_ksize: 9         # structuring element for tophat
 
 hog:
   orientations: 9

@@ -258,10 +258,13 @@ def ablations_main() -> None:
     p.add_argument("--feature-sets", nargs="*", default=["hog", "lbp", "glcm", "lbp+glcm"])
     p.add_argument("--models", nargs="*", default=["svm", "logreg"])
     p.add_argument("--hog-models", nargs="*", default=["svm"])
+    p.add_argument("--only", nargs="*", default=["preprocessing", "resolution", "hog"],
+                   choices=["preprocessing", "resolution", "hog"],
+                   help="ablations to run; the others keep their saved results")
     args = p.parse_args()
     cfg = load_config(args.config)
     run_ablations(cfg, args.feature_sets, args.models, args.hog_models,
-                  Path(cfg.output.results_dir) / "classical")
+                  Path(cfg.output.results_dir) / "classical", kinds=args.only)
 
 
 def classical_report_main() -> None:

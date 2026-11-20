@@ -35,3 +35,29 @@ def test_preprocess_accepts_color_input():
     cfg = PreprocessingConfig()
     out = preprocess_image(img, cfg, image_size=48)
     assert out.shape == (48, 48)
+
+
+def test_enhance_sobel_and_tophat():
+    import pytest
+
+    from idefect.config import Config, _validate as validate
+    from idefect.data.preprocessing import enhance
+
+    img = np.full((40, 40), 120, np.uint8)
+    img[:, 20:] = 200                      # a vertical step edge
+    edges = enhance(img, "sobel")
+    assert edges.dtype == np.uint8 and edges.shape == img.shape
+    assert edges[:, 18:22].mean() > 10 * max(1.0, edges[:, :10].mean())
+
+    flat = np.full((40, 40), 120, np.uint8)
+    flat[10, 10], flat[30, 30] = 200, 40  # a small bright and a small dark detail
+    out = enhance(flat, "tophat", ksize=9)
+    assert out[10, 10] > 200 - 1 and out[30, 30] < 40 + 1
+    assert out[10, 10] >= flat[10, 10] and out[30, 30] <= flat[30, 30]
+    assert out[20, 20] == 120              # plain background is unchanged
+    assert np.array_equal(enhance(flat, "none"), flat)
+
+    cfg = Config()
+    cfg.preprocessing.enhance = "canny"
+    with pytest.raises(ValueError):
+        validate(cfg)
