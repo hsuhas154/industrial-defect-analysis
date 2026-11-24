@@ -96,12 +96,13 @@ class Predictor:
     def _load_cnn(self) -> None:
         import torch
 
-        from idefect.models.registry import build_cnn
+        from idefect.models.registry import artifact_stem, build_cnn
 
         ckpt = torch.load(self.artifact_path, map_location="cpu", weights_only=False)
         self._backend = "cnn"
         arch = ckpt.get("arch", "custom_cnn")  # checkpoints from before the registry are custom CNNs
-        self.kind = arch
+        finetune = ckpt.get("finetune") or "full"
+        self.kind = artifact_stem(arch, finetune)
         self.class_names = ckpt["class_names"]
         self.image_size = ckpt["image_size"]
         self._prep_cfg = ckpt["preprocessing"]
@@ -113,6 +114,8 @@ class Predictor:
             in_channels=cnn_cfg.get("in_channels", 1),
             base_channels=cnn_cfg.get("base_channels", 32),
             dropout=cnn_cfg.get("dropout", 0.3),
+            finetune=finetune,
+            pretrained=False,  # the saved weights are loaded below; nothing is downloaded
         )
         model.load_state_dict(ckpt["state_dict"])
         model.eval()

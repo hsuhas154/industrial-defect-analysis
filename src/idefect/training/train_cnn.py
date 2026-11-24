@@ -40,7 +40,7 @@ from idefect.evaluation.classification import (
 from idefect.experiment_log import config_hash, environment_info, log_run
 from idefect.inference.input_check import confidence_floor, reference_stats
 from idefect.models.custom_cnn import count_parameters
-from idefect.models.registry import build_cnn, display_name
+from idefect.models.registry import artifact_stem, build_cnn, display_name, is_transfer
 from idefect.seed import set_seed
 from idefect.visualization.plots import plot_confusion_matrix, plot_training_curves
 
@@ -158,16 +158,17 @@ def _make_scheduler(cfg: Config, optimizer):
     return None
 
 
-def artifact_name(arch: str) -> str:
-    """File stem of an architecture's artifacts (``<stem>.pt``, ``<stem>_metrics.json``...)."""
-    return arch
+def artifact_name(cfg: Config) -> str:
+    """File stem of a run's artifacts (``<stem>.pt``, ``<stem>_metrics.json``...):
+    the architecture, plus the fine-tuning mode for ImageNet backbones."""
+    return artifact_stem(cfg.cnn.arch, cfg.cnn.finetune)
 
 
-def runs_dir(results_dir: Path, arch: str) -> Path:
-    """Where the per-seed runs of ``arch`` live. The custom CNN keeps the
+def runs_dir(results_dir: Path, stem: str) -> Path:
+    """Where the per-seed runs of ``stem`` live. The custom CNN keeps the
     location it had before other architectures existed."""
     base = Path(results_dir) / "cnn_runs"
-    return base if arch == "custom_cnn" else base / arch
+    return base if stem == "custom_cnn" else base / stem
 
 
 def _tensorboard(cfg: Config, seed: int):
@@ -178,7 +179,7 @@ def _tensorboard(cfg: Config, seed: int):
     except ImportError:
         print("[warn] tensorboard is not installed; skipping TensorBoard logging")
         return None
-    return SummaryWriter(str(Path(cfg.output.logs_dir) / "tensorboard" / f"{cfg.cnn.arch}_seed{seed}"))
+    return SummaryWriter(str(Path(cfg.output.logs_dir) / "tensorboard" / f"{artifact_name(cfg)}_seed{seed}"))
 
 
 def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_path: str = "",
@@ -196,7 +197,8 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
     else:
         _, class_names, split, groups = build_split(cfg)
     arch = cfg.cnn.arch
-    stem = artifact_name(arch)
+    stem = artifact_name(cfg)
+    finetune = cfg.cnn.finetune if is_transfer(arch) else None
     if verbose:
         print(f"[cnn:{arch}] seed={seed} device={device} | {split.summary()} | "
               f"{len(groups)} near-duplicate group(s) kept within one split")
@@ -206,12 +208,16 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
     train_loader, val_loader, test_loader = _make_loaders(run_cfg, split, device)
 
     model = build_cnn(arch, num_classes=split.num_classes, in_channels=cfg.cnn.in_channels,
-                      base_channels=cfg.cnn.base_channels, dropout=cfg.cnn.dropout).to(device)
-    n_params = count_parameters(model)
+                      base_channels=cfg.cnn.base_channels, dropout=cfg.cnn.dropout,
+                      finetune=cfg.cnn.finetune, pretrained=cfg.cnn.pretrained).to(device)
+    n_params = count_parameters(model)                       # trainable
+    n_params_total = sum(p.numel() for p in model.parameters())
     amp = cfg.cnn.amp
     writer = _tensorboard(cfg, seed)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.cnn.lr, weight_decay=cfg.cnn.weight_decay)
+    params = (model.param_groups(cfg.cnn.lr, cfg.cnn.backbone_lr_mult) if hasattr(model, "param_groups")
+              else model.parameters())
+    optimizer = torch.optim.Adam(params, lr=cfg.cnn.lr, weight_decay=cfg.cnn.weight_decay)
     scheduler = _make_scheduler(cfg, optimizer)
 
     history: Dict[str, List[float]] = {
@@ -264,6 +270,7 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
     torch.save(
         {
             "arch": arch,
+            "finetune": finetune,
             "state_dict": model.state_dict(),
             "class_names": class_names,
             "num_classes": split.num_classes,
@@ -296,8 +303,9 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
     metrics = compute_metrics(y_true, y_pred, class_names, y_proba=y_proba)
     metrics.update(
         model=stem,
-        display_name=display_name(arch),
+        display_name=display_name(arch, cfg.cnn.finetune),
         arch=arch,
+        finetune=finetune,
         branch="cnn",
         seed=seed,
         train_time_sec=round(train_time, 2),
@@ -307,6 +315,7 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
         best_val_acc=round(best.get("val_acc", 0.0), 4),
         best_val_macro_f1=round(best.get("val_macro_f1", 0.0), 4),
         n_params=n_params,
+        n_params_total=n_params_total,
         device=str(device),
         config_hash=config_hash(cfg),
         environment=environment_info(),
@@ -332,10 +341,10 @@ def train_cnn(cfg: Config, config_path: str = "", seeds: Optional[Sequence[int]]
 
     seeds = list(seeds) if seeds else list(cfg.cnn.seeds) or [cfg.seed]
     arch = cfg.cnn.arch
-    stem = artifact_name(arch)
+    stem = artifact_name(cfg)
     results_dir = Path(cfg.output.results_dir)
     figures_dir = Path(cfg.output.figures_dir)
-    base = runs_dir(results_dir, arch)
+    base = runs_dir(results_dir, stem)
     runs = {}
     for s in seeds:
         runs[s] = _train_once(cfg, s, base / f"seed{s}", figures_dir, config_path=config_path)
@@ -368,9 +377,9 @@ def train_cnn(cfg: Config, config_path: str = "", seeds: Optional[Sequence[int]]
         history = json.load(fh)
     plot_confusion_matrix(metrics["confusion_matrix"], metrics["class_names"],
                           figures_dir / f"{stem}_confusion_matrix.png",
-                          title=f"{display_name(arch)} confusion matrix (seed {chosen})")
+                          title=f"{display_name(arch, cfg.cnn.finetune)} confusion matrix (seed {chosen})")
     plot_training_curves(history, figures_dir / f"{stem}_training_curves.png")
     ss = metrics["seed_summary"]["test_macro_f1"]
-    print(f"[cnn:{arch}] {len(seeds)} seeds: test macro-F1 {ss['mean']:.4f} +- {ss['std']:.4f} "
+    print(f"[cnn:{stem}] {len(seeds)} seeds: test macro-F1 {ss['mean']:.4f} +- {ss['std']:.4f} "
           f"(min {ss['min']:.4f}, max {ss['max']:.4f}); kept seed {chosen} (best val)")
     return metrics

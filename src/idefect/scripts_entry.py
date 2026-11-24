@@ -55,6 +55,8 @@ def train_cnn_main() -> None:
     _add_config_arg(p)
     p.add_argument("--arch", nargs="*", default=None, choices=available(),
                    help="Architectures to train one after another (default: cnn.arch from the config)")
+    p.add_argument("--finetune", nargs="*", default=None, choices=["frozen", "partial", "full"],
+                   help="Fine-tuning modes for ImageNet backbones (default: cnn.finetune)")
     p.add_argument("--seeds", type=int, nargs="*", default=None,
                    help="Override cnn.seeds from the config, e.g. --seeds 42 43")
     p.add_argument("--epochs", type=int, default=None, help="Override cnn.epochs")
@@ -62,9 +64,13 @@ def train_cnn_main() -> None:
     cfg = load_config(args.config)
     if args.epochs:
         cfg.cnn.epochs = args.epochs
+    from idefect.models.registry import is_transfer
+
     for arch in args.arch or [cfg.cnn.arch]:
         cfg.cnn.arch = arch
-        train_cnn(cfg, config_path=args.config, seeds=args.seeds)
+        for mode in (args.finetune or [cfg.cnn.finetune]) if is_transfer(arch) else [cfg.cnn.finetune]:
+            cfg.cnn.finetune = mode
+            train_cnn(cfg, config_path=args.config, seeds=args.seeds)
 
 
 def predict_main() -> None:
@@ -313,3 +319,53 @@ def leakage_study_main() -> None:
     cfg = load_config(args.config)
     pairs = [tuple(x.split(":")) for x in args.classical]
     leakage_study(cfg, pairs, args.cnn_seeds, Path(cfg.output.results_dir) / "leakage_study")
+
+
+def cnn_studies_main() -> None:
+    from pathlib import Path
+
+    from idefect.training.cnn_studies import data_curve, sensitivity_study
+
+    p = argparse.ArgumentParser(description="CNN sensitivity studies and the data-requirement curve "
+                                            "(validation only).")
+    p.add_argument("study", choices=["sensitivity", "curve"])
+    _add_config_arg(p)
+    p.add_argument("--models", nargs="*", default=["custom_cnn"], help="arch or arch:finetune")
+    p.add_argument("--classical", nargs="*", default=["lbp+glcm:logreg", "lbp+glcm:svm"],
+                   help="feature_set:model pairs for the data curve")
+    p.add_argument("--seeds", type=int, nargs="*", default=[42, 43, 44])
+    p.add_argument("--fractions", type=float, nargs="*", default=[0.1, 0.25, 0.5, 1.0])
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    models = [(m.split(":")[0], m.split(":")[1] if ":" in m else "full") for m in args.models]
+    out_dir = Path(cfg.output.results_dir) / "cnn_studies"
+    if args.study == "sensitivity":
+        sensitivity_study(cfg, models, args.seeds, out_dir)
+    else:
+        classical = [tuple(c.split(":")) for c in args.classical]
+        data_curve(cfg, models, classical, args.seeds, out_dir, fractions=args.fractions)
+
+
+def benchmark_main() -> None:
+    from pathlib import Path
+
+    from idefect.evaluation.efficiency import run_benchmark
+
+    p = argparse.ArgumentParser(description="Efficiency benchmark of every trained model "
+                                            "(run with nothing else on the GPU).")
+    _add_config_arg(p)
+    p.add_argument("--models", nargs="*", default=None, help="artifact stems to include (default: all)")
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    results = Path(cfg.output.results_dir)
+    run_benchmark(cfg, results, results, models=args.models)
+
+
+def cnn_report_main() -> None:
+    from idefect.evaluation.cnn_report import make_cnn_figures
+
+    p = argparse.ArgumentParser(description="Grad-CAM galleries for every trained CNN.")
+    _add_config_arg(p)
+    args = p.parse_args()
+    for k, v in make_cnn_figures(load_config(args.config)).items():
+        print(f"[fig] {k}: {v}")

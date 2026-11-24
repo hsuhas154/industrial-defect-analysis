@@ -208,6 +208,68 @@ input 1x128x128
   macro-F1; test macro-F1 is reported for it and as mean and standard deviation
   over all seeds, so a lucky seed cannot pass as the result.
 
+## Stage E: CNN architecture study and transfer learning
+
+Four classic architectures are implemented from scratch in PyTorch
+(`idefect.models`), each built for 128x128 grayscale input, and each ending in
+global average pooling, dropout and one linear layer like the custom CNN. Each
+answers one question about what makes a CNN work:
+
+* **VGG-style** (`vgg_style.py`, 1.17 M parameters): does depth through
+  repetition help? Four stages of two 3x3 convolutions (two stacked 3x3 layers
+  see a 5x5 region with fewer parameters and one more non-linearity than one
+  5x5 layer), max pooling between stages, widths 32 to 256. VGG's original
+  4096-unit fully connected head is replaced by global average pooling, since
+  on 1,260 images it could only memorize.
+* **ResNet-18** (`resnet.py`, 2.80 M): do residual connections help?
+  Each block learns a correction added to its input, `y = ReLU(F(x) + x)`, so
+  gradients reach early layers through the identity path and a block with
+  nothing to add can stay close to the identity (its last BatchNorm starts at
+  zero). The ImageNet 7x7 stem and stem max pooling are dropped, because at
+  128 px they would discard the fine texture that matters here.
+* **DenseNet-BC** (`densenet.py`, 0.77 M): does feature reuse help? Every layer
+  receives the concatenated maps of all earlier layers in its block and adds
+  16 new ones; 1x1 bottlenecks and compressing transitions keep it narrow.
+* **MobileNetV2** (`mobilenet.py`, 2.23 M): what does efficiency cost?
+  Depthwise separable convolutions (a per-channel 3x3 filter, then a 1x1
+  channel mix) cost about 8 to 9 times fewer multiplications than standard
+  3x3 convolutions; inverted residual blocks expand, filter, and project back
+  linearly.
+
+**Transfer learning** (`idefect.models.transfer`): ResNet-18, DenseNet-121 and
+MobileNetV2 with ImageNet weights (torchvision). A grayscale image is repeated
+into three channels and normalized with the ImageNet mean and standard
+deviation inside the model. Three fine-tuning depths are compared: **frozen**
+(only a new linear head is trained; the backbone's BatchNorm statistics stay
+fixed), **partial** (the last stage is unfrozen too) and **full** (every layer
+trains). Unfrozen pretrained layers learn ten times slower than the new head.
+
+**One recipe for every network.** All CNNs, scratch and pretrained, use the
+custom CNN's training recipe unchanged: the same split, augmentation, Adam
+(learning rate 1e-3, weight decay 1e-4), cosine schedule, 150 epochs, batch 64,
+checkpoint by validation macro-F1, five seeds and full precision. Differences
+in results therefore come from the architecture or the pretraining, not from
+tuning effort spent on one network and not another. The trainer also supports
+bfloat16 mixed precision and TensorBoard logging, both off for reported runs.
+
+**Grad-CAM** (`idefect.evaluation.gradcam`): the last convolutional feature
+maps are weighted by the average gradient of the predicted class score and
+summed, `CAM = ReLU(sum_k w_k A_k)` with `w_k = mean dy/dA_k`, then upsampled.
+Bright regions are those that raised the class score. A unit test checks it on
+a model whose evidence is known by construction.
+
+**Efficiency** (`idefect.evaluation.efficiency`): parameters, size on disk,
+preprocessing time, single-image latency (median of 50 timed calls after
+warm-up) and batch-64 throughput on CPU and GPU, and peak GPU memory for
+inference and for one training step, measured for every trained model with
+nothing else on the GPU.
+
+**Sensitivity studies** (`idefect.training.cnn_studies`): input resolution
+(64, 128, 200 px), CLAHE on or off, and a data-requirement curve (10 to 100
+percent of the training split, class-stratified subsets, for CNNs and
+classical models). Like the classical ablations, they report validation
+macro-F1 only, over three seeds; the test split is never used.
+
 ## Evaluation
 
 `idefect.evaluation` reports, on the held-out test split:

@@ -37,10 +37,11 @@ def _order_key(m: Dict):
         from idefect.models.registry import ARCH_ORDER
 
         arch = m.get("arch", m["model"])
-        return (2, ARCH_ORDER.index(arch) if arch in ARCH_ORDER else len(ARCH_ORDER), m["model"])
+        tune = ("frozen", "partial", "full").index(m["finetune"]) if m.get("finetune") else 0
+        return (2, ARCH_ORDER.index(arch) if arch in ARCH_ORDER else len(ARCH_ORDER), tune, m["model"])
     clf = m.get("classifier") or m["model"].split("+")[-1]
     rank = CLASSIFIER_ORDER.index(clf) if clf in CLASSIFIER_ORDER else len(CLASSIFIER_ORDER)
-    return (1, rank, m["model"])
+    return (1, rank, 0, m["model"])
 
 COLUMNS = [
     ("accuracy", "Accuracy"),

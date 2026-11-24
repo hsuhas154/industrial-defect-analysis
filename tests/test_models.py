@@ -94,3 +94,63 @@ def test_bfloat16_autocast_trains_on_gpu():
     opt = torch.optim.Adam(model.parameters())
     loss, acc = _train_epoch(model, loader, torch.nn.CrossEntropyLoss(), torch.device("cuda"), opt, amp=True)
     assert loss == loss and 0.0 <= acc <= 1.0  # finite loss, valid accuracy
+
+
+def test_efficiency_benchmark_runs(tiny):
+    from idefect.evaluation.efficiency import run_benchmark
+    from idefect.training.train_cnn import train_cnn
+
+    train_cnn(tiny)                                     # a tiny custom CNN
+    results = Path(tiny.output.results_dir)
+    rows = run_benchmark(tiny, results, results / "bench")
+    r = next(r for r in rows if r["model"] == "custom_cnn")
+    assert r["params_total"] >= r["params_trainable"] > 0
+    assert r["cpu_latency_ms"] > 0 and r["cpu_throughput_ips"] > 0 and r["preprocess_ms"] > 0
+    assert r["test_macro_f1"] is not None
+    saved = json.loads((results / "bench" / "efficiency.json").read_text())
+    assert saved["rows"][0]["model"] == "custom_cnn" and "environment" in saved
+
+
+def test_gradcam_report_draws_every_cnn(tiny):
+    from idefect.evaluation.cnn_report import make_cnn_figures
+    from idefect.training.train_cnn import train_cnn
+
+    for arch in ("custom_cnn", "resnet"):
+        tiny.cnn.arch = arch
+        train_cnn(tiny)
+    out = make_cnn_figures(tiny, per_class=1, max_errors=2)
+    assert {"gradcam_custom_cnn", "gradcam_resnet", "gradcam_comparison"} <= set(out)
+    assert all(p.exists() and p.stat().st_size > 0 for p in out.values())
+
+
+def test_subsample_is_stratified_seeded_and_from_train_only():
+    from idefect.training.cnn_studies import subsample
+
+    train = [(f"img{i}", i % 3) for i in range(60)]
+    a, b = subsample(train, 0.25, 0), subsample(train, 0.25, 0)
+    assert a == b and len(a) == 15
+    assert sorted(lab for _, lab in a) == [0] * 5 + [1] * 5 + [2] * 5
+    assert subsample(train, 0.25, 1) != a
+    assert set(a) <= set(train)
+
+
+def test_studies_use_validation_only(tiny, monkeypatch):
+    import idefect.training.train_cnn as C
+    from idefect.training.cnn_studies import data_curve, sensitivity_study
+
+    seen = []
+    real = C._train_once
+
+    def spy(*a, **kw):
+        seen.append(kw.get("evaluate_test", True))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(C, "_train_once", spy)
+    out = Path(tiny.output.results_dir) / "studies"
+    res = sensitivity_study(tiny, [("custom_cnn", "full")], [0], out, sizes=(32,))
+    tiny.data.image_size = 32
+    curve = data_curve(tiny, [("custom_cnn", "full")], [("lbp", "logreg")], [0], out, fractions=(0.5,))
+    assert seen and not any(seen)                       # test split never evaluated
+    assert {r["variant"] for r in res["rows"]} >= {"32 px", "no CLAHE"}
+    assert {r["branch"] for r in curve["rows"]} == {"cnn", "classical"}
+    assert not list(out.rglob("*.pt"))                  # study checkpoints are not kept

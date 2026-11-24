@@ -141,6 +141,9 @@ class CNNConfig:
     early_stopping_patience: int = 0  # epochs without improvement; 0 disables
     cache_images: bool = True  # keep preprocessed images in memory
     seeds: List[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
+    finetune: str = "full"  # ImageNet backbones only: frozen | partial | full
+    pretrained: bool = True  # ImageNet backbones: start from ImageNet weights
+    backbone_lr_mult: float = 0.1  # learning-rate factor for unfrozen pretrained layers
     amp: bool = False  # bfloat16 mixed precision on CUDA (off: full precision, as in all reported runs)
     tensorboard: bool = False  # also write per-epoch curves to <logs_dir>/tensorboard
 
@@ -217,6 +220,8 @@ def _validate(cfg: Config) -> None:
         )
     if cfg.preprocessing.enhance not in {"none", "sobel", "tophat"}:
         raise ValueError("preprocessing.enhance must be one of none|sobel|tophat")
+    if cfg.cnn.finetune not in {"frozen", "partial", "full"}:
+        raise ValueError("cnn.finetune must be one of frozen|partial|full")
     if cfg.cnn.scheduler not in {"cosine", "plateau", "none"}:
         raise ValueError("cnn.scheduler must be one of cosine|plateau|none")
     if cfg.cnn.select_metric not in {"macro_f1", "accuracy", "loss"}:
