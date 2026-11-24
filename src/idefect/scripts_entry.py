@@ -362,10 +362,17 @@ def benchmark_main() -> None:
 
 
 def cnn_report_main() -> None:
-    from idefect.evaluation.cnn_report import make_cnn_figures
+    from idefect.evaluation.cnn_report import make_cnn_figures, make_efficiency_figures, make_study_figures
 
-    p = argparse.ArgumentParser(description="Grad-CAM galleries for every trained CNN.")
+    p = argparse.ArgumentParser(description="Grad-CAM galleries for every trained CNN, and "
+                                            "accuracy-vs-cost figures from the benchmark.")
     _add_config_arg(p)
+    p.add_argument("--only-efficiency", action="store_true",
+                   help="skip Grad-CAM; redraw only the accuracy-vs-cost and study figures")
     args = p.parse_args()
-    for k, v in make_cnn_figures(load_config(args.config)).items():
+    cfg = load_config(args.config)
+    out = {} if args.only_efficiency else make_cnn_figures(cfg)
+    out.update(make_efficiency_figures(cfg))
+    out.update(make_study_figures(cfg))
+    for k, v in out.items():
         print(f"[fig] {k}: {v}")

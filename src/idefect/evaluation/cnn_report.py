@@ -60,8 +60,15 @@ def make_cnn_figures(cfg, per_class: int = 2, max_errors: int = 6) -> Dict[str, 
     results_dir = Path(cfg.output.results_dir)
     fig_dir = Path(cfg.output.figures_dir) / "cnn"
     out: Dict[str, Path] = {}
-    arts = sorted(results_dir.glob("*.pt"),
-                  key=lambda p: (next((i for i, a in enumerate(ARCH_ORDER) if p.stem.startswith(a)), 99), p.stem))
+    def order(p: Path):
+        # scratch models first, then each ImageNet backbone as frozen, partial, full
+        if p.stem in ARCH_ORDER:
+            return (0, ARCH_ORDER.index(p.stem), 0)
+        arch, _, ft = p.stem.rpartition("_")
+        modes = ("frozen", "partial", "full")
+        return (1, ARCH_ORDER.index(arch) if arch in ARCH_ORDER else 99, modes.index(ft) if ft in modes else 9)
+
+    arts = sorted(results_dir.glob("*.pt"), key=order)
     comparison_paths: List[str] = []
     comparison: Dict[str, tuple] = {}
     for art in arts:
@@ -92,4 +99,49 @@ def make_cnn_figures(cfg, per_class: int = 2, max_errors: int = 6) -> Dict[str, 
         base = [load_and_preprocess(p, cfg.preprocessing, cfg.data.image_size) for p in comparison_paths]
         out["gradcam_comparison"] = V.plot_gradcam_comparison(
             base, [Path(p).stem for p in comparison_paths], comparison, fig_dir / "gradcam_comparison.png")
+    return out
+
+
+def make_efficiency_figures(cfg) -> Dict[str, Path]:
+    """Accuracy against cost, from ``efficiency.json`` (written by the benchmark)."""
+    import json
+
+    from idefect.visualization import cnn as V
+
+    results_dir = Path(cfg.output.results_dir)
+    f = results_dir / "efficiency.json"
+    if not f.exists():
+        return {}
+    rows = json.loads(f.read_text())["rows"]
+    fig_dir = Path(cfg.output.figures_dir) / "cnn"
+    return {
+        "accuracy_vs_cpu_latency": V.plot_accuracy_vs_cost(
+            rows, "cpu_latency_ms", "single-image CPU latency (ms, log scale; preprocessing excluded)",
+            fig_dir / "accuracy_vs_cpu_latency.png", "Accuracy against CPU latency"),
+        "accuracy_vs_params": V.plot_accuracy_vs_cost(
+            [r for r in rows if r["branch"] == "cnn"], "params_total", "parameters (log scale)",
+            fig_dir / "accuracy_vs_params.png", "CNN accuracy against size"),
+    }
+
+
+def make_study_figures(cfg) -> Dict[str, Path]:
+    """Sensitivity (resolution, CLAHE) and data-curve figures from the saved studies."""
+    import json
+
+    from idefect.visualization import cnn as V
+
+    d = Path(cfg.output.results_dir) / "cnn_studies"
+    fig_dir = Path(cfg.output.figures_dir) / "cnn"
+    out: Dict[str, Path] = {}
+    if (d / "cnn_sensitivity.json").exists():
+        s = json.loads((d / "cnn_sensitivity.json").read_text())["summary"]
+        out["cnn_resolution"] = V.plot_sensitivity(s, "resolution", ["64 px", "128 px", "200 px"],
+                                                   fig_dir / "cnn_resolution.png",
+                                                   "CNN input resolution (validation split)")
+        out["cnn_clahe"] = V.plot_sensitivity(s, "preprocessing", ["no CLAHE", "CLAHE"],
+                                              fig_dir / "cnn_clahe.png", "Does CLAHE help a CNN? (validation split)")
+    if (d / "data_curve.json").exists():
+        c = json.loads((d / "data_curve.json").read_text())
+        n_by_fraction = {r["fraction"]: r["n_train"] for r in c["rows"]}
+        out["data_curve"] = V.plot_data_curve(c["summary"], n_by_fraction, fig_dir / "data_curve.png")
     return out

@@ -4,9 +4,12 @@ For every trained artifact in the results directory:
 
 * parameters (trainable and total) and size on disk;
 * preprocessing time per image (resize + CLAHE, shared by every model);
-* single-image latency on the CPU and, for CNNs, on the GPU: the median over
-  ``repeats`` timed calls after ``warmup`` untimed ones, so one-off costs
-  (lazy initialization, cuDNN autotuning, caches) are excluded;
+* single-image latency on the CPU and, for CNNs, on the GPU. Batch-1 timings
+  drift by tens of percent over minutes (CPU frequency, background load), so
+  they are measured in ``LATENCY_ROUNDS`` rounds with all models interleaved
+  inside each round, each round the median of ``LATENCY_CALLS`` timed calls
+  after untimed warm-up calls; the reported latency is the median over rounds
+  and the min to max range over rounds is stored with it;
 * throughput at batch 64 (images per second), CPU and GPU;
 * peak GPU memory for batch-64 inference and for one batch-64 training step
   (forward, backward and optimizer update).
@@ -19,12 +22,16 @@ else on the GPU.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
+
+LATENCY_ROUNDS = 5
+LATENCY_CALLS = 40
 
 
 def _median_ms(fn: Callable[[], None], warmup: int, repeats: int, sync: Callable[[], None]) -> float:
@@ -59,7 +66,10 @@ def preprocessing_ms(cfg, warmup: int = 5, repeats: int = 50) -> float:
                       warmup, repeats, lambda: None)
 
 
-def benchmark_cnn(path: Path, imgs: List[np.ndarray], warmup: int = 10, repeats: int = 50) -> Dict:
+def benchmark_cnn(path: Path, imgs: List[np.ndarray], warmup: int = 10,
+                  repeats: int = 50) -> Tuple[Dict, Dict[str, Callable[[], None]]]:
+    """Static costs, throughput and memory; also returns single-image
+    inference functions per device for the interleaved latency rounds."""
     import torch
 
     from idefect.inference.predict import Predictor
@@ -74,11 +84,18 @@ def benchmark_cnn(path: Path, imgs: List[np.ndarray], warmup: int = 10, repeats:
            "size_mb": round(path.stat().st_size / 2**20, 3), "cpu_threads": torch.get_num_threads()}
 
     model = model.cpu().eval()
+    cpu_model = copy.deepcopy(model).eval()
     n = len(x64)
     with torch.no_grad():
         out["cpu_latency_ms"] = _median_ms(lambda: model(x1), warmup, repeats, lambda: None)
         t = _median_ms(lambda: model(x64), 3, 10, lambda: None)
     out["cpu_throughput_ips"] = n / (t / 1000.0)
+
+    def cpu_fn():
+        with torch.no_grad():
+            cpu_model(x1)
+
+    fns = {"cpu": cpu_fn}
 
     if torch.cuda.is_available():
         dev = torch.device("cuda")
@@ -107,12 +124,21 @@ def benchmark_cnn(path: Path, imgs: List[np.ndarray], warmup: int = 10, repeats:
             sync()
             out["gpu_train_peak_mb"] = (torch.cuda.max_memory_allocated() - base) / 2**20
             del opt
-        model.cpu()
+        model.eval()
+        for p in model.parameters():
+            p.grad = None
         torch.cuda.empty_cache()
-    return out
+
+        def gpu_fn():
+            with torch.no_grad():
+                model(g1)
+
+        fns["gpu"] = gpu_fn
+    return out, fns
 
 
-def benchmark_classical(path: Path, imgs: List[np.ndarray], warmup: int = 3, repeats: int = 30) -> Dict:
+def benchmark_classical(path: Path, imgs: List[np.ndarray], warmup: int = 3,
+                        repeats: int = 30) -> Tuple[Dict, Dict[str, Callable[[], None]]]:
     from idefect.features.registry import extract_one
     from idefect.inference.predict import Predictor
 
@@ -125,9 +151,9 @@ def benchmark_classical(path: Path, imgs: List[np.ndarray], warmup: int = 3, rep
         est.predict(np.stack([extract_one(im, fs, fcfg) for im in batch_imgs]))
 
     t = _median_ms(batch, 1, 5, lambda: None)
-    return {"model": pred.kind, "branch": "classical", "size_mb": round(path.stat().st_size / 2**20, 3),
-            "cpu_latency_ms": _median_ms(one, warmup, repeats, lambda: None),
-            "cpu_throughput_ips": len(batch_imgs) / (t / 1000.0)}
+    return ({"model": pred.kind, "branch": "classical", "size_mb": round(path.stat().st_size / 2**20, 3),
+             "cpu_latency_ms": _median_ms(one, warmup, repeats, lambda: None),
+             "cpu_throughput_ips": len(batch_imgs) / (t / 1000.0)}, {"cpu": one})
 
 
 def run_benchmark(cfg, results_dir: Path, out_dir: Path, models: List[str] = None) -> List[Dict]:
@@ -135,12 +161,13 @@ def run_benchmark(cfg, results_dir: Path, out_dir: Path, models: List[str] = Non
 
     imgs = _images(cfg, 64)
     pre = preprocessing_ms(cfg)
-    rows = []
+    rows, fns = [], []
     paths = sorted(results_dir.glob("*.joblib")) + sorted(results_dir.glob("*.pt"))
     for p in paths:
         if models and p.stem not in models:
             continue
-        r = benchmark_cnn(p, imgs) if p.suffix == ".pt" else benchmark_classical(p, imgs)
+        r, f = benchmark_cnn(p, imgs) if p.suffix == ".pt" else benchmark_classical(p, imgs)
+        fns.append(f)
         r["preprocess_ms"] = pre
         mfile = results_dir / f"{p.stem}_metrics.json"
         if mfile.exists():
@@ -152,10 +179,32 @@ def run_benchmark(cfg, results_dir: Path, out_dir: Path, models: List[str] = Non
                      train_time_sec=ss.get("train_time_sec", {}).get("mean", m.get("train_time_sec",
                                                                                     m.get("fit_time_sec"))))
         rows.append(r)
-        print(f"[bench] {r['model']:34s} cpu {r['cpu_latency_ms']:8.2f} ms"
-              + (f"  gpu {r['gpu_latency_ms']:6.2f} ms" if "gpu_latency_ms" in r else ""), flush=True)
+
+    # Interleaved latency rounds: slow drift affects every model alike.
+    sync = {"cpu": lambda: None}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            sync["gpu"] = torch.cuda.synchronize
+    except ImportError:
+        pass
+    rounds: List[Dict[str, List[float]]] = [{} for _ in rows]
+    for _ in range(LATENCY_ROUNDS):
+        for i, f in enumerate(fns):
+            for dev, fn in f.items():
+                rounds[i].setdefault(dev, []).append(_median_ms(fn, 5, LATENCY_CALLS, sync[dev]))
+    for r, rr in zip(rows, rounds):
+        for dev, vals in rr.items():
+            r[f"{dev}_latency_ms"] = float(np.median(vals))
+            r[f"{dev}_latency_range_ms"] = [float(min(vals)), float(max(vals))]
+        print(f"[bench] {r['model']:34s} cpu {r['cpu_latency_ms']:8.2f} ms "
+              f"[{r['cpu_latency_range_ms'][0]:.2f}, {r['cpu_latency_range_ms'][1]:.2f}]"
+              + (f"  gpu {r['gpu_latency_ms']:6.2f} ms [{r['gpu_latency_range_ms'][0]:.2f}, "
+                 f"{r['gpu_latency_range_ms'][1]:.2f}]" if "gpu_latency_ms" in r else ""), flush=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "efficiency.json", "w") as fh:
         json.dump({"rows": rows, "environment": environment_info(), "image_size": cfg.data.image_size,
-                   "preprocess_ms": pre}, fh, indent=2)
+                   "preprocess_ms": pre, "latency_rounds": LATENCY_ROUNDS, "latency_calls": LATENCY_CALLS},
+                  fh, indent=2)
     return rows
