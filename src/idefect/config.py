@@ -125,6 +125,7 @@ class ClassicalMLConfig:
 
 @dataclass
 class CNNConfig:
+    arch: str = "custom_cnn"  # custom_cnn | vgg | resnet | densenet | mobilenet (models.registry)
     in_channels: int = 1
     base_channels: int = 32
     dropout: float = 0.3
@@ -140,6 +141,8 @@ class CNNConfig:
     early_stopping_patience: int = 0  # epochs without improvement; 0 disables
     cache_images: bool = True  # keep preprocessed images in memory
     seeds: List[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
+    amp: bool = False  # bfloat16 mixed precision on CUDA (off: full precision, as in all reported runs)
+    tensorboard: bool = False  # also write per-epoch curves to <logs_dir>/tensorboard
 
 
 @dataclass

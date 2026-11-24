@@ -85,6 +85,7 @@ classical_ml:
     standardize: true      # StandardScaler before the SVM
 
 cnn:
+  arch: "custom_cnn"       # custom_cnn | vgg | resnet | densenet | mobilenet (scripts/train_cnn.py --arch)
   in_channels: 1
   base_channels: 32        # channel width of the first conv block
   dropout: 0.3
@@ -101,6 +102,8 @@ cnn:
   early_stopping_patience: 0  # stop after N epochs without improvement; 0 disables
   cache_images: true       # preprocess once and keep in memory (about 30 MB for NEU)
   seeds: [42, 43, 44, 45, 46]  # one run per seed on the same split; mean and std reported
+  amp: false               # bfloat16 mixed precision; off so every architecture trains in full precision
+  tensorboard: false       # per-epoch curves for TensorBoard (the JSON history is always written)
 
 output:
   results_dir: "experiments/results"

@@ -104,7 +104,8 @@ the test images are genuinely new.
 | Classifiers: Decision Tree, logistic regression, k-NN, SVM, Random Forest, XGBoost (GPU) | `src/idefect/classical_ml/models.py` |
 | Hyperparameter search with stratified *group* k-fold CV on the training split | `src/idefect/training/train_classical_ml.py` |
 | Ablations: preprocessing, resolution, HOG parameters | `src/idefect/training/ablations.py` |
-| Custom CNN from scratch in PyTorch, multi-seed training, checkpoint by validation macro-F1 | `src/idefect/models/custom_cnn.py`, `src/idefect/training/train_cnn.py` |
+| CNNs from scratch in PyTorch: custom CNN, VGG-style, ResNet-18, DenseNet-BC, MobileNetV2, one model registry | `src/idefect/models/` |
+| One CNN trainer for every architecture: multi-seed runs, checkpoint by validation macro-F1, optional bfloat16 mixed precision and TensorBoard | `src/idefect/training/train_cnn.py` |
 | Leakage study (random versus group-aware split) and CNN epoch study | `src/idefect/training/studies.py` |
 | Metrics: accuracy, macro P/R/F1, per-class scores, ROC-AUC, confusion matrix | `src/idefect/evaluation/classification.py` |
 | Error analysis, comparison table, classical-branch figures | `src/idefect/evaluation/` |

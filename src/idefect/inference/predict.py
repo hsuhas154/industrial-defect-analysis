@@ -5,7 +5,8 @@ Handles both artifact kinds produced by the training scripts:
 * classical joblib bundles (``*.joblib``): a feature set (HOG, LBP, GLCM or
   a combination) with a classifier (Decision Tree, logistic regression,
   k-NN, SVM, Random Forest or XGBoost);
-* CNN checkpoints (``*.pt``): the custom CNN.
+* CNN checkpoints (``*.pt``): any architecture from ``idefect.models.registry``
+  (the checkpoint stores its name).
 
 The saved artifacts carry their own preprocessing and feature configs so the
 exact feature pipeline used at training time is reproduced here.
@@ -95,17 +96,19 @@ class Predictor:
     def _load_cnn(self) -> None:
         import torch
 
-        from idefect.models.custom_cnn import CustomCNN
+        from idefect.models.registry import build_cnn
 
         ckpt = torch.load(self.artifact_path, map_location="cpu", weights_only=False)
         self._backend = "cnn"
-        self.kind = "custom_cnn"
+        arch = ckpt.get("arch", "custom_cnn")  # checkpoints from before the registry are custom CNNs
+        self.kind = arch
         self.class_names = ckpt["class_names"]
         self.image_size = ckpt["image_size"]
         self._prep_cfg = ckpt["preprocessing"]
         self.reference = ckpt.get("reference", {})
         cnn_cfg = ckpt["cnn_config"]
-        model = CustomCNN(
+        model = build_cnn(
+            arch,
             num_classes=ckpt["num_classes"],
             in_channels=cnn_cfg.get("in_channels", 1),
             base_channels=cnn_cfg.get("base_channels", 32),

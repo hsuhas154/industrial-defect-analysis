@@ -34,7 +34,10 @@ def display(m: Dict) -> str:
 
 def _order_key(m: Dict):
     if m.get("branch") == "cnn" or m["model"].startswith("custom_cnn"):
-        return (2, 0, m["model"])
+        from idefect.models.registry import ARCH_ORDER
+
+        arch = m.get("arch", m["model"])
+        return (2, ARCH_ORDER.index(arch) if arch in ARCH_ORDER else len(ARCH_ORDER), m["model"])
     clf = m.get("classifier") or m["model"].split("+")[-1]
     rank = CLASSIFIER_ORDER.index(clf) if clf in CLASSIFIER_ORDER else len(CLASSIFIER_ORDER)
     return (1, rank, m["model"])

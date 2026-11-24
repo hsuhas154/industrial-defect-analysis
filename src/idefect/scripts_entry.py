@@ -49,8 +49,12 @@ def train_classical_main() -> None:
 def train_cnn_main() -> None:
     from idefect.training.train_cnn import train_cnn
 
-    p = argparse.ArgumentParser(description="Train the custom CNN (one run per seed).")
+    from idefect.models.registry import available
+
+    p = argparse.ArgumentParser(description="Train CNN architectures (one run per seed each).")
     _add_config_arg(p)
+    p.add_argument("--arch", nargs="*", default=None, choices=available(),
+                   help="Architectures to train one after another (default: cnn.arch from the config)")
     p.add_argument("--seeds", type=int, nargs="*", default=None,
                    help="Override cnn.seeds from the config, e.g. --seeds 42 43")
     p.add_argument("--epochs", type=int, default=None, help="Override cnn.epochs")
@@ -58,7 +62,9 @@ def train_cnn_main() -> None:
     cfg = load_config(args.config)
     if args.epochs:
         cfg.cnn.epochs = args.epochs
-    train_cnn(cfg, config_path=args.config, seeds=args.seeds)
+    for arch in args.arch or [cfg.cnn.arch]:
+        cfg.cnn.arch = arch
+        train_cnn(cfg, config_path=args.config, seeds=args.seeds)
 
 
 def predict_main() -> None:

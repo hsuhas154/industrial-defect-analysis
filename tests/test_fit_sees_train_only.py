@@ -83,9 +83,9 @@ def test_cnn_optimizer_sees_training_images_only(cfg, monkeypatch):
     seen = {"epochs": [], "ref": []}
     real_epoch, real_ref = C._train_epoch, C.reference_stats
 
-    def spy_epoch(model, loader, criterion, device, optimizer):
+    def spy_epoch(model, loader, criterion, device, optimizer, **kw):
         seen["epochs"].append(list(loader.dataset.samples))
-        return real_epoch(model, loader, criterion, device, optimizer)
+        return real_epoch(model, loader, criterion, device, optimizer, **kw)
 
     def spy_ref(paths):
         seen["ref"].append(list(paths))

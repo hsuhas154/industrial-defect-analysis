@@ -1,6 +1,8 @@
-"""Train the custom CNN branch: preprocessing -> CNN -> classification.
+"""Train the CNN branch: preprocessing -> CNN -> classification.
 
-Trains on the same deterministic split used by the classical branch, tracks
+Any architecture from :mod:`idefect.models.registry` (``cnn.arch``) is trained
+with the same recipe. Trains on the same deterministic split used by the
+classical branch, tracks
 train/val loss, accuracy and macro-F1 per epoch, keeps the best checkpoint by a
 configurable validation metric, and evaluates that checkpoint once on the
 held-out test split.
@@ -37,7 +39,8 @@ from idefect.evaluation.classification import (
 )
 from idefect.experiment_log import config_hash, environment_info, log_run
 from idefect.inference.input_check import confidence_floor, reference_stats
-from idefect.models.custom_cnn import CustomCNN, count_parameters
+from idefect.models.custom_cnn import count_parameters
+from idefect.models.registry import build_cnn, display_name
 from idefect.seed import set_seed
 from idefect.visualization.plots import plot_confusion_matrix, plot_training_curves
 
@@ -54,15 +57,22 @@ def resolve_device(pref: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _train_epoch(model, loader, criterion, device, optimizer) -> Tuple[float, float]:
+def _autocast(device: torch.device, amp: bool):
+    """bfloat16 autocast on CUDA when ``amp``; a no-op context otherwise."""
+    return torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                          enabled=bool(amp) and device.type == "cuda")
+
+
+def _train_epoch(model, loader, criterion, device, optimizer, amp: bool = False) -> Tuple[float, float]:
     model.train()
     total_loss, correct, n = 0.0, 0, 0
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(images)
-        loss = criterion(logits, labels)
+        with _autocast(device, amp):
+            logits = model(images)
+            loss = criterion(logits.float(), labels)
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * images.size(0)
@@ -72,7 +82,7 @@ def _train_epoch(model, loader, criterion, device, optimizer) -> Tuple[float, fl
 
 
 @torch.no_grad()
-def predict_loader(model, loader, device, criterion=None):
+def predict_loader(model, loader, device, criterion=None, amp: bool = False):
     """Run ``model`` over ``loader`` in eval mode.
 
     Returns ``(y_true, y_pred, probabilities, mean_loss)``; ``mean_loss`` is
@@ -84,7 +94,8 @@ def predict_loader(model, loader, device, criterion=None):
     total_loss, n = 0.0, 0
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
-        logits = model(images)
+        with _autocast(device, amp):
+            logits = model(images).float()
         if criterion is not None:
             total_loss += criterion(logits, labels.to(device)).item() * images.size(0)
             n += images.size(0)
@@ -147,6 +158,29 @@ def _make_scheduler(cfg: Config, optimizer):
     return None
 
 
+def artifact_name(arch: str) -> str:
+    """File stem of an architecture's artifacts (``<stem>.pt``, ``<stem>_metrics.json``...)."""
+    return arch
+
+
+def runs_dir(results_dir: Path, arch: str) -> Path:
+    """Where the per-seed runs of ``arch`` live. The custom CNN keeps the
+    location it had before other architectures existed."""
+    base = Path(results_dir) / "cnn_runs"
+    return base if arch == "custom_cnn" else base / arch
+
+
+def _tensorboard(cfg: Config, seed: int):
+    if not cfg.cnn.tensorboard:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        print("[warn] tensorboard is not installed; skipping TensorBoard logging")
+        return None
+    return SummaryWriter(str(Path(cfg.output.logs_dir) / "tensorboard" / f"{cfg.cnn.arch}_seed{seed}"))
+
+
 def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_path: str = "",
                 verbose: bool = True, split_override=None, evaluate_test: bool = True) -> Dict:
     """Train one CNN with ``seed`` on the shared split; write its artifacts to ``out_dir``.
@@ -161,21 +195,21 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
         split, groups, class_names = split_override, [], split_override.class_names
     else:
         _, class_names, split, groups = build_split(cfg)
+    arch = cfg.cnn.arch
+    stem = artifact_name(arch)
     if verbose:
-        print(f"[cnn] seed={seed} device={device} | {split.summary()} | "
+        print(f"[cnn:{arch}] seed={seed} device={device} | {split.summary()} | "
               f"{len(groups)} near-duplicate group(s) kept within one split")
 
     run_cfg = Config(**{**cfg.__dict__})
     run_cfg.seed = seed
     train_loader, val_loader, test_loader = _make_loaders(run_cfg, split, device)
 
-    model = CustomCNN(
-        num_classes=split.num_classes,
-        in_channels=cfg.cnn.in_channels,
-        base_channels=cfg.cnn.base_channels,
-        dropout=cfg.cnn.dropout,
-    ).to(device)
+    model = build_cnn(arch, num_classes=split.num_classes, in_channels=cfg.cnn.in_channels,
+                      base_channels=cfg.cnn.base_channels, dropout=cfg.cnn.dropout).to(device)
     n_params = count_parameters(model)
+    amp = cfg.cnn.amp
+    writer = _tensorboard(cfg, seed)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.cnn.lr, weight_decay=cfg.cnn.weight_decay)
     scheduler = _make_scheduler(cfg, optimizer)
@@ -190,13 +224,15 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
     t0 = time.time()
     for epoch in range(1, cfg.cnn.epochs + 1):
         lr = optimizer.param_groups[0]["lr"]
-        tr_loss, tr_acc = _train_epoch(model, train_loader, criterion, device, optimizer)
-        yv, pv, _, va_loss = predict_loader(model, val_loader, device, criterion)
+        tr_loss, tr_acc = _train_epoch(model, train_loader, criterion, device, optimizer, amp=amp)
+        yv, pv, _, va_loss = predict_loader(model, val_loader, device, criterion, amp=amp)
         va_acc = float((yv == pv).mean()) if len(yv) else 0.0
         va_f1 = float(f1_score(yv, pv, average="macro", zero_division=0)) if len(yv) else 0.0
         for k, v in (("train_loss", tr_loss), ("train_acc", tr_acc), ("val_loss", va_loss),
                      ("val_acc", va_acc), ("val_macro_f1", va_f1), ("lr", lr)):
             history[k].append(v)
+            if writer is not None:
+                writer.add_scalar(k, v, epoch)
         if verbose and (epoch == 1 or epoch % 10 == 0 or epoch == cfg.cnn.epochs):
             print(f"[epoch {epoch:3d}/{cfg.cnn.epochs}] lr={lr:.2e} train_loss={tr_loss:.4f} "
                   f"train_acc={tr_acc:.4f} | val_loss={va_loss:.4f} val_acc={va_acc:.4f} val_f1={va_f1:.4f}")
@@ -216,15 +252,18 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
                 print(f"[cnn] early stopping at epoch {epoch}")
             break
     train_time = time.time() - t0
+    if writer is not None:
+        writer.close()
     if best_state is not None:
         model.load_state_dict(best_state)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    yv_true, _, pv_val, _ = predict_loader(model, val_loader, device)
+    yv_true, _, pv_val, _ = predict_loader(model, val_loader, device, amp=amp)
     reference = {"image": reference_stats([p for p, _ in split.train]),
                  "confidence_floor": confidence_floor(pv_val, yv_true)}
     torch.save(
         {
+            "arch": arch,
             "state_dict": model.state_dict(),
             "class_names": class_names,
             "num_classes": split.num_classes,
@@ -237,9 +276,9 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
             "config_hash": config_hash(cfg),
             "reference": reference,
         },
-        out_dir / "custom_cnn.pt",
+        out_dir / f"{stem}.pt",
     )
-    with open(out_dir / "custom_cnn_history.json", "w") as fh:
+    with open(out_dir / f"{stem}_history.json", "w") as fh:
         json.dump(history, fh, indent=2)
     if not evaluate_test:
         return {
@@ -252,12 +291,13 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
             "device": str(device),
         }
     t1 = time.time()
-    y_true, y_pred, y_proba, _ = predict_loader(model, test_loader, device)
+    y_true, y_pred, y_proba, _ = predict_loader(model, test_loader, device, amp=amp)
     infer_time = time.time() - t1
     metrics = compute_metrics(y_true, y_pred, class_names, y_proba=y_proba)
     metrics.update(
-        model="custom_cnn",
-        display_name="Custom CNN",
+        model=stem,
+        display_name=display_name(arch),
+        arch=arch,
         branch="cnn",
         seed=seed,
         train_time_sec=round(train_time, 2),
@@ -271,36 +311,38 @@ def _train_once(cfg: Config, seed: int, out_dir: Path, fig_dir: Path, config_pat
         config_hash=config_hash(cfg),
         environment=environment_info(),
     )
-    save_metrics(metrics, out_dir / "custom_cnn_metrics.json")
-    save_predictions(out_dir / "custom_cnn_test_predictions.csv", [p for p, _ in split.test],
+    save_metrics(metrics, out_dir / f"{stem}_metrics.json")
+    save_predictions(out_dir / f"{stem}_test_predictions.csv", [p for p, _ in split.test],
                      y_true, y_pred, class_names, y_proba)
-    log_run(cfg.output.logs_dir, f"custom_cnn_seed{seed}", cfg, metrics, config_path=config_path)
+    log_run(cfg.output.logs_dir, f"{stem}_seed{seed}", cfg, metrics, config_path=config_path)
     if verbose:
-        print(f"[eval:cnn seed={seed}] {summarize(metrics)} | best epoch {best.get('epoch')} "
+        print(f"[eval:{arch} seed={seed}] {summarize(metrics)} | best epoch {best.get('epoch')} "
               f"val_f1 {best.get('val_macro_f1', 0):.4f} | {train_time:.1f}s")
     return metrics
 
 
 def train_cnn(cfg: Config, config_path: str = "", seeds: Optional[Sequence[int]] = None) -> Dict:
-    """Train the custom CNN once per seed on the same split.
+    """Train architecture ``cfg.cnn.arch`` once per seed on the same split.
 
-    The artifact kept as ``custom_cnn.pt`` is the seed with the best
-    *validation* macro-F1 (never chosen on test). Test metrics are reported for
-    that model and as mean and standard deviation over all seeds.
+    The artifact kept as ``<arch>.pt`` is the seed with the best *validation*
+    macro-F1 (never chosen on test). Test metrics are reported for that model
+    and as mean and standard deviation over all seeds.
     """
     import shutil
 
     seeds = list(seeds) if seeds else list(cfg.cnn.seeds) or [cfg.seed]
+    arch = cfg.cnn.arch
+    stem = artifact_name(arch)
     results_dir = Path(cfg.output.results_dir)
     figures_dir = Path(cfg.output.figures_dir)
+    base = runs_dir(results_dir, arch)
     runs = {}
     for s in seeds:
-        runs[s] = _train_once(cfg, s, results_dir / "cnn_runs" / f"seed{s}", figures_dir,
-                              config_path=config_path)
+        runs[s] = _train_once(cfg, s, base / f"seed{s}", figures_dir, config_path=config_path)
 
     chosen = max(seeds, key=lambda s: (runs[s]["best_val_macro_f1"], -s))
-    src = results_dir / "cnn_runs" / f"seed{chosen}"
-    for name in ("custom_cnn.pt", "custom_cnn_test_predictions.csv", "custom_cnn_history.json"):
+    src = base / f"seed{chosen}"
+    for name in (f"{stem}.pt", f"{stem}_test_predictions.csv", f"{stem}_history.json"):
         shutil.copyfile(src / name, results_dir / name)
     metrics = dict(runs[chosen])
 
@@ -321,14 +363,14 @@ def train_cnn(cfg: Config, config_path: str = "", seeds: Optional[Sequence[int]]
                               "val_macro_f1": runs[s]["best_val_macro_f1"],
                               "best_epoch": runs[s]["best_epoch"]} for s in seeds},
     }
-    save_metrics(metrics, results_dir / "custom_cnn_metrics.json")
-    with open(src / "custom_cnn_history.json") as fh:
+    save_metrics(metrics, results_dir / f"{stem}_metrics.json")
+    with open(src / f"{stem}_history.json") as fh:
         history = json.load(fh)
     plot_confusion_matrix(metrics["confusion_matrix"], metrics["class_names"],
-                          figures_dir / "custom_cnn_confusion_matrix.png",
-                          title=f"Custom CNN confusion matrix (seed {chosen})")
-    plot_training_curves(history, figures_dir / "custom_cnn_training_curves.png")
+                          figures_dir / f"{stem}_confusion_matrix.png",
+                          title=f"{display_name(arch)} confusion matrix (seed {chosen})")
+    plot_training_curves(history, figures_dir / f"{stem}_training_curves.png")
     ss = metrics["seed_summary"]["test_macro_f1"]
-    print(f"[cnn] {len(seeds)} seeds: test macro-F1 {ss['mean']:.4f} +- {ss['std']:.4f} "
+    print(f"[cnn:{arch}] {len(seeds)} seeds: test macro-F1 {ss['mean']:.4f} +- {ss['std']:.4f} "
           f"(min {ss['min']:.4f}, max {ss['max']:.4f}); kept seed {chosen} (best val)")
     return metrics
