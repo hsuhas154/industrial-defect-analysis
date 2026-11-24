@@ -36,8 +36,25 @@ KEY_FIGURES = [
     "roc_pr/*.png",
     "custom_cnn_confusion_matrix.png",
     "custom_cnn_training_curves.png",
-    "*_confusion_matrix.png",
-    "errors/*_misclassified.png",
+    # classical models (Phase 2) and the CNNs the write-up discusses
+    "lbp+glcm+*_confusion_matrix.png",
+    "hog+lbp+glcm+*_confusion_matrix.png",
+    "errors/lbp+glcm+*_misclassified.png",
+    "errors/hog+lbp+glcm+*_misclassified.png",
+    "errors/custom_cnn_misclassified.png",
+    *[f"{m}_{kind}.png" for m in ("vgg", "resnet18_imagenet_full", "densenet121_imagenet_full")
+      for kind in ("confusion_matrix", "training_curves")],
+    "errors/vgg_misclassified.png",
+    "errors/resnet18_imagenet_full_misclassified.png",
+    # Phase 3: CNN study
+    "cnn/accuracy_vs_cpu_latency.png",
+    "cnn/accuracy_vs_params.png",
+    "cnn/data_curve.png",
+    "cnn/cnn_resolution.png",
+    "cnn/cnn_clahe.png",
+    "cnn/gradcam_comparison.png",
+    "cnn/gradcam_vgg.png",
+    "cnn/gradcam_densenet121_imagenet_full.png",
 ]
 
 

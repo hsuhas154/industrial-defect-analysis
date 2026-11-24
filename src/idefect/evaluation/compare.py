@@ -19,7 +19,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from idefect.visualization.plots import _ensure_parent, plt, tidy
+from idefect.visualization.plots import _ensure_parent, plt
 
 README_START = "<!-- RESULTS:START -->"
 README_END = "<!-- RESULTS:END -->"
@@ -96,8 +96,12 @@ def _latency(m: Dict) -> str:
 
 
 def _params(m: Dict) -> str:
-    if m.get("n_params") is not None:
-        return f"{m['n_params']:,}"
+    total = m.get("n_params_total", m.get("n_params"))  # n_params counts trainable weights only
+    if total is not None:
+        trainable = m.get("n_params")
+        if trainable is not None and trainable != total:
+            return f"{total:,} ({trainable:,} trained)"
+        return f"{total:,}"
     if m.get("feature_dim") is not None:
         return f"{m['feature_dim']:,}-d features"
     return "n/a"
@@ -119,6 +123,10 @@ def markdown_table(rows: List[Dict], include_time: bool = True) -> str:
         lines.append("| " + " | ".join(cells) + " |")
     n = {m.get("n_samples") for m in rows}
     note = f"\n\nAll scores on the same held-out test split (n = {n.pop()} images)." if len(n) == 1 else ""
+    if any(r.get("branch") == "cnn" for r in rows):
+        note += (" For CNNs the metric columns are the seed kept by validation macro-F1 (the saved model);"
+                 " the spread column gives the test macro-F1 mean +- std over all seeds. For classical"
+                 " models the spread column is the cross-validation score on the training split.")
     return "\n".join(lines) + note + "\n"
 
 
@@ -135,26 +143,40 @@ def per_class_f1_table(rows: List[Dict]) -> str:
 
 
 def plot_comparison(rows: List[Dict], out_path: str | Path) -> Path:
-    keys = [("accuracy", "accuracy"), ("macro_f1", "macro-F1"), ("roc_auc_ovr_macro", "ROC-AUC")]
-    names = [display(m).replace(" + ", "\n+ ", 1) if len(display(m)) > 18 else display(m)
-             for m in rows]
-    x = np.arange(len(rows))
-    width = 0.26
-    fig, ax = plt.subplots(figsize=(max(7, 1.9 * len(rows) + 2.0), 4.4))
-    for i, (k, label) in enumerate(keys):
-        vals = [m.get(k) or 0.0 for m in rows]
-        bars = ax.bar(x + (i - 1) * width, vals, width, label=label)
-        for b, v in zip(bars, vals):
-            ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}", ha="center",
-                    va="bottom", fontsize=6.5)
-    lo = min([m.get("accuracy") or 1.0 for m in rows] + [m.get("macro_f1") or 1.0 for m in rows])
-    ax.set_ylim(max(0.0, lo - 0.1), 1.02)
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, fontsize=8)
-    ax.set(ylabel="score (test split)", title="Model comparison on NEU")
-    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
-    ax.grid(axis="y", alpha=0.3)
-    tidy(fig)
+    """Horizontal bars, one row per model, sorted by test macro-F1.
+
+    CNNs show the mean over their seeds with a standard-deviation bar (the
+    honest number for a model family); classical models are deterministic and
+    show their single score. Colour marks the family.
+    """
+    from matplotlib.patches import Patch
+
+    def score(m):
+        ss = (m.get("seed_summary") or {}).get("test_macro_f1")
+        return (ss["mean"], ss["std"]) if ss else (m["macro_f1"], 0.0)
+
+    def family(m):
+        if m.get("branch") != "cnn" and not m["model"].startswith("custom_cnn"):
+            return "classical"
+        return "ImageNet CNN" if m.get("finetune") else "CNN from scratch"
+
+    colors = {"classical": "tab:orange", "CNN from scratch": "tab:blue", "ImageNet CNN": "tab:green"}
+    items = sorted(rows, key=lambda m: score(m)[0])
+    fig, ax = plt.subplots(figsize=(9.5, 0.36 * len(items) + 1.6), layout="constrained")
+    y = np.arange(len(items))
+    vals = [score(m)[0] for m in items]
+    errs = [score(m)[1] for m in items]
+    ax.barh(y, vals, xerr=errs, capsize=2, color=[colors[family(m)] for m in items], height=0.7)
+    for yi, v, e in zip(y, vals, errs):
+        ax.text(v + e + 0.002, yi, f"{v:.4f}", va="center", fontsize=7.5)
+    ax.set_yticks(y)
+    ax.set_yticklabels([display(m) for m in items], fontsize=8)
+    lo = min(v - e for v, e in zip(vals, errs))
+    ax.set_xlim(max(0.0, lo - 0.02), 1.012)
+    ax.set(xlabel="test macro-F1 (CNNs: mean +- std over seeds; classical: single deterministic run)",
+           title=f"Model comparison on NEU (held-out test split, n = {items[0].get('n_samples', '?')})")
+    ax.grid(axis="x", alpha=0.3)
+    ax.legend(handles=[Patch(color=c, label=k) for k, c in colors.items()], fontsize=8, loc="lower right")
     out_path = _ensure_parent(out_path)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -174,11 +196,12 @@ def write_summary(results_dir: str | Path, figures_dir: str | Path) -> Dict[str,
     csv_path = results_dir / "summary.csv"
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["model"] + [k for k, _ in COLUMNS] + ["train_time_sec", "n_params", "feature_dim"])
+        w.writerow(["model"] + [k for k, _ in COLUMNS] + ["train_time_sec", "n_params_trainable",
+                                                          "n_params_total", "feature_dim"])
         for m in rows:
             w.writerow([m["model"]] + [m.get(k) for k, _ in COLUMNS] + [
                 m.get("train_time_sec", m.get("fit_time_sec")), m.get("n_params"),
-                m.get("feature_dim")])
+                m.get("n_params_total", m.get("n_params")), m.get("feature_dim")])
 
     chart = plot_comparison(rows, Path(figures_dir) / "model_comparison.png")
     return {"markdown": md_path, "csv": csv_path, "chart": chart}

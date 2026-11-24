@@ -154,3 +154,22 @@ def test_studies_use_validation_only(tiny, monkeypatch):
     assert {r["variant"] for r in res["rows"]} >= {"32 px", "no CLAHE"}
     assert {r["branch"] for r in curve["rows"]} == {"cnn", "classical"}
     assert not list(out.rglob("*.pt"))                  # study checkpoints are not kept
+
+
+def test_app_shows_gradcam_for_a_cnn(tiny, monkeypatch, dummy_dataset):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from idefect.training.train_cnn import train_cnn
+
+    train_cnn(tiny)                                     # only a custom CNN in this results folder
+    monkeypatch.setenv("IDEFECT_RESULTS_DIR", tiny.output.results_dir)
+    root = Path(__file__).resolve().parents[1]
+    at = AppTest.from_file(str(root / "app" / "streamlit_app.py"), default_timeout=120)
+    at.run()
+    image = next(Path(dummy_dataset).rglob("*.png"))
+    at.file_uploader[0].upload(image.name, image.read_bytes(), "image/png")
+    at.sidebar.checkbox[1].check()                      # "Show where a CNN looked (Grad-CAM)"
+    at.run()
+    assert not at.exception
+    assert "Where the model looked (Grad-CAM)" in [s.value for s in at.subheader]

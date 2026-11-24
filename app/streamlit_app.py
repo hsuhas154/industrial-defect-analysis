@@ -122,6 +122,20 @@ def show_copy_check(image: np.ndarray) -> None:
         st.success(f"No copy found. Closest NEU image is {name}, judged distinct.")
 
 
+def gradcam_overlay(predictor: Predictor, image: np.ndarray) -> np.ndarray:
+    """RGB overlay of the Grad-CAM heat map (predicted class) on the image the CNN sees."""
+    import torch
+    from matplotlib import colormaps
+
+    from idefect.evaluation.gradcam import GradCAM
+
+    proc = predictor.preprocess(image)
+    cams, _ = GradCAM(predictor.model)(torch.from_numpy(proc)[None, None].float())
+    heat = colormaps["jet"](cams[0])[..., :3]
+    base = np.repeat(np.clip(proc, 0, 1)[..., None], 3, axis=2)
+    return np.clip(0.55 * base + 0.45 * heat, 0, 1)
+
+
 def probability_chart(probabilities: dict) -> alt.Chart:
     """Horizontal bars in the fixed class order, one band per class."""
     df = pd.DataFrame({"class": list(probabilities), "probability": list(probabilities.values())})
@@ -166,6 +180,9 @@ def main() -> None:
             if metrics.get("roc_auc_ovr_macro") is not None:
                 st.write(f"ROC-AUC (OvR): **{metrics['roc_auc_ovr_macro']:.4f}**")
         compare_all = st.checkbox("Compare all trained models", value=False)
+        show_cam = st.checkbox("Show where a CNN looked (Grad-CAM)", value=False,
+                               help="Heat map of the image regions that raised the predicted class "
+                                    "score. CNN models (.pt) only.")
         check_copy = st.checkbox(
             "Check whether the upload is a copy of a NEU image", value=False,
             help="Searches the local NEU dataset for whole-image copies (any size, flip, "
@@ -213,6 +230,17 @@ def main() -> None:
         st.warning(w)
     st.caption("All models are closed-set: they always pick one of the six NEU classes, "
                "even for images that show none of them.")
+
+    if show_cam:
+        st.subheader("Where the model looked (Grad-CAM)")
+        if predictor.model is not None and labels[choice].suffix == ".pt":
+            c1, _ = st.columns([1, 1.3])
+            with c1:
+                st.image(gradcam_overlay(predictor, image), clamp=True, width="stretch",
+                         caption=f"Red: regions that raised the score of '{result.label}'. "
+                                 "Grad-CAM shows where evidence was found, not why.")
+        else:
+            st.info("Grad-CAM applies to CNNs. Choose a .pt model in the sidebar.")
 
     if check_copy:
         show_copy_check(image)

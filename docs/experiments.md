@@ -4,7 +4,9 @@ This document records what was run, how, and what the results mean. Every
 number here is produced by the scripts in `scripts/` and can be regenerated
 with `bash scripts/run_all.sh`; the raw metrics live in
 `experiments/results/` and the run log in `experiments/logs/runs.csv`. The
-notebooks (`notebooks/01` to `03`) show the same results with their code.
+notebooks (`notebooks/01` to `05`) show the same results with their code.
+Sections 1 to 12 cover the classical branch and the first CNN (Phase 2);
+sections 13 to 19 the CNN architecture study and transfer learning (Phase 3).
 
 ## 1. Setup
 
@@ -437,5 +439,261 @@ approach transfers to other surfaces.
   the seven models, most of them with near-certain confidence, and a nearly
   white image is called inclusion by the CNN. Confidence alone therefore
   cannot flag such inputs; the demo's input checks (colour, brightness and
-  contrast outside the training range) do, and calibration is studied in
-  Phase 3.
+  contrast outside the training range) do. Probability calibration and an
+  explicit "unknown" class are not part of this project.
+
+## 13. Phase 3 setup: one recipe for every CNN
+
+Phase 3 asks what makes a CNN work on NEU: depth, residual links, dense
+connectivity, efficient convolutions, or knowledge transferred from ImageNet.
+Every network below is trained with the custom CNN's recipe unchanged (same
+split, augmentation, Adam with learning rate 1e-3 and weight decay 1e-4,
+cosine schedule, 150 epochs, batch 64, checkpoint by validation macro-F1,
+full precision) and five seeds (42 to 46). No network got extra tuning, so
+differences come from the architecture or the pretraining. ImageNet backbones
+see the same 128 px grayscale input, repeated into three channels and
+ImageNet-normalized inside the model; unfrozen pretrained layers learn ten
+times slower than the new head. Architectures are described in
+`docs/methodology.md` (Stage E).
+
+## 14. Architectures trained from scratch (test split, n = 269)
+
+| Model | Parameters | Test macro-F1, 5 seeds | Range | Validation macro-F1 | Time per seed |
+|---|---|---|---|---|---|
+| Custom CNN | 93,670 | 0.9881 +- 0.0055 | 0.9814 to 0.9963 | 0.9789 +- 0.0016 | 77 s |
+| VGG-style | 1,174,182 | **0.9940 +- 0.0033** | 0.9888 to 0.9963 | 0.9912 +- 0.0033 | 194 s |
+| ResNet-18 | 2,796,006 | 0.9903 +- 0.0020 | 0.9888 to 0.9925 | 0.9839 +- 0.0032 | 527 s |
+| DenseNet-BC | 773,638 | 0.9866 +- 0.0117 | 0.9739 to 0.9963 | 0.9898 +- 0.0031 | 490 s |
+| MobileNetV2 | 2,230,982 | 0.9591 +- 0.0156 | 0.9330 to 0.9738 | 0.9737 +- 0.0040 | 128 s |
+
+* **Depth through repetition works; the fancier blocks do not add more.**
+  VGG-style is the best scratch network, but the custom CNN, VGG, ResNet-18
+  and DenseNet-BC lie within about two test images of each other on average
+  (one image is 0.0037 macro-F1), so among them only MobileNetV2 is clearly
+  worse.
+* **MobileNetV2 from scratch is the weakest and least stable** (seed spread
+  0.0156, worst seed 0.9330). The architecture is not the problem: with
+  ImageNet weights the same network reaches 0.9970 (section 15). Its 2.2 M
+  parameters are hard to fit from 1,260 images alone.
+* **DenseNet-BC is the least stable of the rest**: its seeds range from
+  0.9739 to 0.9963.
+* Every scratch CNN, in every seed, misclassifies `Sc_44.bmp` (0 of 25 runs
+  get it right), the faint scratch every classical model also calls
+  inclusion.
+
+## 15. Transfer learning from ImageNet (test split, n = 269)
+
+| Backbone | Fine-tuning | Trained / total parameters | Test macro-F1, 5 seeds | Range | Validation macro-F1 | Time per seed |
+|---|---|---|---|---|---|---|
+| ResNet-18 | frozen | 3,078 / 11,179,590 | 0.9630 +- 0.0031 | 0.9587 to 0.9661 | 0.9679 +- 0.0020 | 52 s |
+| ResNet-18 | partial | 8,396,806 / 11,179,590 | 0.9940 +- 0.0033 | 0.9888 to 0.9963 | 0.9993 +- 0.0017 | 64 s |
+| ResNet-18 | full | 11,179,590 | 0.9978 +- 0.0020 | 0.9963 to 1.0000 | 1.0000 +- 0.0000 | 112 s |
+| DenseNet-121 | frozen | 6,150 / 6,960,006 | 0.9764 +- 0.0041 | 0.9696 to 0.9809 | 0.9896 +- 0.0017 | 148 s |
+| DenseNet-121 | partial | 2,166,278 / 6,960,006 | 0.9962 +- 0.0065 | 0.9849 to 1.0000 | 0.9963 +- 0.0000 | 168 s |
+| DenseNet-121 | full | 6,960,006 | **1.0000 +- 0.0000** | 1.0000 to 1.0000 | 1.0000 +- 0.0000 | 355 s |
+| MobileNetV2 | frozen | 7,686 / 2,231,558 | 0.9794 +- 0.0060 | 0.9730 to 0.9849 | 0.9762 +- 0.0019 | 46 s |
+| MobileNetV2 | partial | 1,689,030 / 2,231,558 | 0.9970 +- 0.0017 | 0.9962 to 1.0000 | 1.0000 +- 0.0000 | 59 s |
+| MobileNetV2 | full | 2,231,558 | 0.9940 +- 0.0043 | 0.9887 to 1.0000 | 1.0000 +- 0.0000 | 123 s |
+
+* **Pretraining is the largest single gain of the project.** Fully
+  fine-tuned DenseNet-121 classifies all 269 test images correctly in all
+  five seeds, and its validation macro-F1 is 1.0000 in every seed too; the
+  checkpoint and the seed were chosen on validation, never on test. The
+  split is the group-aware one (no test image shares a near-duplicate group
+  with a training image), so this is not leakage. Fully fine-tuned ResNet-18
+  (0.9978) and partially fine-tuned MobileNetV2 (0.9970) are within one test
+  image of it.
+* **Frozen ImageNet features are not enough.** A linear head on fixed
+  features reaches only 0.963 to 0.979, below every scratch CNN except
+  MobileNetV2: natural-image features describe steel texture poorly until
+  they are adapted.
+* **How much to unfreeze depends on the backbone.** ResNet-18 and DenseNet-121
+  improve at each step (frozen, partial, full). MobileNetV2 is best partially
+  fine-tuned (0.9970); full fine-tuning is lower (0.9940) and less stable,
+  within about one standard deviation, so the two are a tie rather than a
+  reversal.
+* **Pretraining makes MobileNetV2 viable**: from 0.9591 +- 0.0156 from
+  scratch to 0.9970 +- 0.0017 partially fine-tuned.
+* **Pretrained models solve the image no NEU-only model can.** `Sc_44.bmp` is
+  classified correctly in 33 of the 45 ImageNet runs (every seed of
+  ResNet-18 partial, DenseNet-121 partial and full, and MobileNetV2 frozen
+  and partial), and in none of the 25 scratch-CNN runs. ResNet-18 frozen
+  never gets it right; ResNet-18 full does in 3 of 5 seeds and MobileNetV2
+  full in 1.
+* **Validation saturates.** Several transfer models reach 1.0000 validation
+  macro-F1 in every seed, so the validation split can no longer rank them;
+  the test split separates them by one or two images, which is within noise.
+
+| DenseNet-121 (ImageNet, full) | ResNet-18 (ImageNet, full) |
+|---|---|
+| ![DenseNet-121 confusion matrix](figures/densenet121_imagenet_full_confusion_matrix.png) | ![ResNet-18 confusion matrix](figures/resnet18_imagenet_full_confusion_matrix.png) |
+
+![Model comparison](figures/model_comparison.png)
+
+## 16. Where the CNNs look (Grad-CAM)
+
+![Grad-CAM across CNNs](figures/cnn/gradcam_comparison.png)
+
+* **The scratch CNNs with fine final maps trace the defect**: the thin
+  scratch line, the edges of dark patches, the crazing network. Their last
+  feature maps are 16x16 (custom CNN, ResNet-18, DenseNet-BC) or 8x8 (VGG)
+  cells at 128 px input.
+* **Networks that downsample 32 times produce coarse blobs**: the ImageNet
+  backbones and the scratch MobileNetV2 end in a 4x4 map at 128 px, so they
+  localize regions, not lines, even when they classify better. Grad-CAM shows
+  where evidence was found, not how fine the model's internal reasoning is.
+* **Grad-CAM does not explain `Sc_44.bmp`.** Its faint band covers 4 pixel
+  columns (3 percent of the image); every model puts 2 to 6 percent of its
+  Grad-CAM mass there (2.4 to 5.4 percent for those that predict inclusion,
+  4.3 to 6.1 percent for those that predict scratches), so the maps cannot
+  tell the right models from the wrong ones at this scale.
+* The per-model galleries are in `experiments/figures/cnn/gradcam_<model>.png`
+  (correct test images per class first, the model's errors last).
+
+![Grad-CAM, VGG-style](figures/cnn/gradcam_vgg.png)
+
+## 17. Efficiency (laptop: RTX 5070 Laptop GPU, 16-thread CPU)
+
+Single-image latency excludes preprocessing (resize and CLAHE: 0.16 ms per
+image, identical for every model). Batch-1 timings drift by tens of percent
+over minutes, so they were measured in five interleaved rounds; the table
+gives the median and the range over rounds. Batch-64 throughput is stable to
+within a few percent. Frozen, partial and full variants of one backbone are
+the same network at inference, so their spread is measurement noise.
+
+| Model | Parameters | Size on disk | CPU latency | GPU latency | GPU throughput | GPU memory, one training step | Test macro-F1 |
+|---|---|---|---|---|---|---|---|
+| Custom CNN | 93,670 | 0.37 MB | 1.3 ms (1.3 to 1.4) | 0.5 ms | 9,909 img/s | 688 MB | 0.9881 |
+| VGG-style | 1,174,182 | 4.50 MB | 3.8 ms (3.6 to 3.9) | 0.9 ms | 3,574 img/s | 1,212 MB | 0.9940 |
+| ResNet-18 (scratch) | 2,796,006 | 10.72 MB | 9.0 ms (8.5 to 9.2) | 2.2 ms | 1,272 img/s | 2,388 MB | 0.9903 |
+| DenseNet-BC (scratch) | 773,638 | 3.17 MB | 15.5 ms (12.6 to 16.4) | 5.0 ms | 1,078 img/s | 4,456 MB | 0.9866 |
+| MobileNetV2 (scratch) | 2,230,982 | 8.74 MB | 7.4 ms (7.3 to 7.5) | 2.6 ms | 6,569 img/s | 1,648 MB | 0.9591 |
+| ResNet-18 (ImageNet, full) | 11,179,590 | 42.73 MB | 6.8 ms (5.5 to 7.5) | 2.5 ms | 5,528 img/s | 501 MB | 0.9978 |
+| DenseNet-121 (ImageNet, full) | 6,960,006 | 27.15 MB | 22.1 ms (16.2 to 22.5) | 13.0 ms | 1,663 img/s | 2,647 MB | 1.0000 |
+| MobileNetV2 (ImageNet, partial) | 2,231,558 | 8.76 MB | 7.5 ms (7.4 to 7.7) | 2.7 ms | 6,691 img/s | 220 MB | 0.9970 |
+| LBP + GLCM + Logistic Regression | 102 features | 0.01 MB | 9.0 ms (8.9 to 9.2) | n/a | 111 img/s (CPU) | n/a | 0.9887 |
+
+The full table for all 20 models is in `experiments/results/efficiency.json`.
+
+* **The custom CNN is the cheapest model by every measure** (1.3 ms on a
+  CPU, 0.37 MB) and only about two test images behind the best.
+* **The classical model is not cheaper.** Its 9 ms are almost all LBP and
+  GLCM feature extraction on the CPU; the logistic regression itself costs
+  microseconds. The custom CNN is about 7 times faster on the CPU and the
+  VGG-style CNN about 2 times.
+* **Accuracy against cost.** Partially fine-tuned MobileNetV2 (0.9970 at
+  7.5 ms CPU, 8.8 MB) and fully fine-tuned ResNet-18 (0.9978 at 6.8 ms CPU)
+  are within one test image of the perfect DenseNet-121 at about a third of
+  its CPU latency. DenseNet-121's 121 layers make it the slowest CNN at batch
+  size 1, on the GPU too, where per-layer launch overhead dominates.
+* **ImageNet backbones train faster than the scratch networks**: ResNet-18
+  (ImageNet, full) needs 112 s per seed against 527 s for the scratch
+  ResNet-18, because torchvision's stem shrinks the image four times before
+  the first residual stage, while the scratch version keeps 128 px for fine
+  texture.
+* Frozen and partial models need little memory to train (no gradients flow
+  through the frozen layers), which matters on small GPUs.
+
+![Accuracy against CPU latency](figures/cnn/accuracy_vs_cpu_latency.png)
+
+![CNN accuracy against size](figures/cnn/accuracy_vs_params.png)
+
+## 18. Sensitivity studies and data requirement (validation split only)
+
+Three models were studied: the custom CNN (baseline), the VGG-style CNN (best
+scratch model by validation) and ResNet-18 (ImageNet, full). ResNet-18 and
+DenseNet-121 (both full) tie at validation macro-F1 1.0000; ResNet-18 was
+taken because it trains three times faster. Three seeds each; the test split
+is never used.
+
+**Input resolution and CLAHE** (validation macro-F1):
+
+| Model | 64 px | 128 px | 200 px | no CLAHE | CLAHE |
+|---|---|---|---|---|---|
+| Custom CNN | **0.9878 +- 0.0021** | 0.9794 +- 0.0021 | 0.9721 +- 0.0019 | 0.9805 +- 0.0020 | 0.9794 +- 0.0021 |
+| VGG-style | 0.9963 +- 0.0064 | 0.9927 +- 0.0000 | 0.9927 +- 0.0000 | 0.9915 +- 0.0021 | 0.9927 +- 0.0000 |
+| ResNet-18 (ImageNet, full) | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+
+* **The custom CNN gets worse as the resolution grows** (0.9878, 0.9794,
+  0.9721), each step about four seed standard deviations. Its receptive field
+  is only about 22 pixels; at a smaller input each unit sees a larger part of
+  a defect. Its 128 px default was never tuned for it; the main runs keep it,
+  so this is reported as a finding rather than used to change results after
+  the fact.
+* **VGG is flat**, and ResNet-18 (ImageNet) is perfect at every size: the
+  validation split cannot rank its settings.
+* **CLAHE does not matter for CNNs** (differences of at most 0.0012, inside
+  the seed spread). Together with Phase 2: CLAHE is within noise for texture
+  features, hurts HOG, and is unnecessary for CNNs, which learn their own
+  contrast normalization.
+
+**Data requirement** (validation macro-F1, mean +- std over 3 seeds; training
+subsets are class-stratified and drawn from the training split only):
+
+| Model | 10 % (126 images) | 25 % (313) | 50 % (630) | 100 % (1,260) |
+|---|---|---|---|---|
+| ResNet-18 (ImageNet, full) | **0.9815 +- 0.0148** | **0.9951 +- 0.0057** | **0.9988 +- 0.0021** | **1.0000** |
+| VGG-style | 0.9427 +- 0.0289 | 0.9684 +- 0.0105 | 0.9842 +- 0.0021 | 0.9927 |
+| Custom CNN | 0.9118 +- 0.0507 | 0.9538 +- 0.0141 | 0.9637 +- 0.0108 | 0.9794 +- 0.0021 |
+| LBP + GLCM + LogReg | 0.9227 +- 0.0280 | 0.9155 +- 0.0224 | 0.9242 +- 0.0300 | 0.9449 |
+| LBP + GLCM + SVM | 0.8710 +- 0.0689 | 0.9218 +- 0.0197 | 0.9169 +- 0.0212 | 0.9340 |
+
+* **"Handcrafted features need less data" does not hold here.** With 126
+  images the texture classifier only ties the small custom CNN (0.9227
+  against 0.9118 +- 0.0507) and already trails VGG; from 313 images on every
+  CNN is ahead.
+* **The pretrained CNN is the data-efficient choice**: trained on 126 images
+  it already matches the custom CNN trained on all 1,260 (0.9815 against
+  0.9794), and with 313 it is above every scratch CNN at any size.
+* **Texture classifiers hardly improve with more data** (logistic regression
+  from 0.92 to 0.94): they are limited by what LBP and GLCM can describe, not
+  by sample size.
+* The SVM is the noisiest with little data: its grid search over C and gamma
+  is chosen from 5-fold scores on a few hundred images.
+
+![Data requirement](figures/cnn/data_curve.png)
+
+| Resolution | CLAHE |
+|---|---|
+| ![CNN resolution](figures/cnn/cnn_resolution.png) | ![CNN and CLAHE](figures/cnn/cnn_clahe.png) |
+
+## 19. Classical versus CNN: conclusion
+
+| Question | Classical (LBP + GLCM + logistic regression) | CNN |
+|---|---|---|
+| Accuracy (test macro-F1) | 0.9887 | 0.9881 (custom CNN) to 1.0000 (DenseNet-121, ImageNet, full) |
+| Data needed | plateaus early, about 0.92 to 0.94 on validation from 126 to 1,260 images | keeps improving; pretrained: 0.98 with 126 images |
+| Training cost | 0.01 s fit and a 0.1 s grouped CV search on a CPU, after feature extraction | 46 s to 9 min per seed on a laptop GPU |
+| Inference (CPU, one image) | 9 ms, almost all feature extraction | 1.3 ms (custom CNN) to 22 ms (DenseNet-121) |
+| Interpretability | 102 named texture statistics, linear weights | Grad-CAM maps; fine-grained for scratch CNNs, coarse for ImageNet backbones |
+| Deployment | scikit-learn, no GPU, 10 KB model | PyTorch; 0.4 to 43 MB; GPU optional |
+| Failure mode | inclusion versus faint scratches | same for NEU-only CNNs; ImageNet fine-tuning mostly resolves it |
+
+On NEU with a leakage-free split:
+
+1. **Well-chosen handcrafted features are a strong baseline.** LBP + GLCM with
+   a linear model ties a small CNN trained from scratch, is fully
+   interpretable and needs no GPU.
+2. **A CNN from scratch is not automatically better**: four of five
+   architectures land within about two test images of the texture model.
+3. **Transfer learning is what moves the result**: partial or full ImageNet
+   fine-tuning reaches 0.994 to 1.000, needs a tenth of the data for 0.98, and
+   is the only approach that classifies `Sc_44.bmp` correctly.
+4. **For deployment on a CPU**, the custom CNN (1.3 ms, 0.4 MB) or partially
+   fine-tuned MobileNetV2 (7.5 ms, 0.997) are the sensible choices; the
+   perfect DenseNet-121 costs about three times MobileNetV2's latency for at
+   most one more correct test image.
+
+## 20. Phase 3 limitations
+
+* NEU is close to saturated for pretrained CNNs: with 269 test images, one
+  image is 0.0037 macro-F1, and several models are within one image of each
+  other. Their ranking is not meaningful beyond "near perfect"; harder data
+  (DAGM, KolektorSDD) is the subject of Phase 4.
+* Every CNN used one shared recipe; per-architecture tuning could change the
+  scratch ranking slightly (for example the custom CNN prefers 64 px).
+* ImageNet backbones were fine-tuned at 128 px, below their 224 px training
+  resolution; larger inputs could sharpen their Grad-CAM maps.
+* Latency was measured on one laptop with other software running; batch-1
+  timings vary by up to about 40 percent between rounds, which the reported
+  ranges show.
