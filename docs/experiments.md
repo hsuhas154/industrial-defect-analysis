@@ -532,7 +532,7 @@ times slower than the new head. Architectures are described in
 
 ## 16. Where the CNNs look (Grad-CAM)
 
-![Grad-CAM across CNNs](figures/cnn/gradcam_comparison.png)
+![Grad-CAM across CNNs](figures/gradcam_comparison.png)
 
 * **The scratch CNNs with fine final maps trace the defect**: the thin
   scratch line, the edges of dark patches, the crazing network. Their last
@@ -550,7 +550,7 @@ times slower than the new head. Architectures are described in
 * The per-model galleries are in `experiments/figures/cnn/gradcam_<model>.png`
   (correct test images per class first, the model's errors last).
 
-![Grad-CAM, VGG-style](figures/cnn/gradcam_vgg.png)
+![Grad-CAM, VGG-style](figures/gradcam_vgg.png)
 
 ## 17. Efficiency (laptop: RTX 5070 Laptop GPU, 16-thread CPU)
 
@@ -594,9 +594,9 @@ The full table for all 20 models is in `experiments/results/efficiency.json`.
 * Frozen and partial models need little memory to train (no gradients flow
   through the frozen layers), which matters on small GPUs.
 
-![Accuracy against CPU latency](figures/cnn/accuracy_vs_cpu_latency.png)
+![Accuracy against CPU latency](figures/accuracy_vs_cpu_latency.png)
 
-![CNN accuracy against size](figures/cnn/accuracy_vs_params.png)
+![CNN accuracy against size](figures/accuracy_vs_params.png)
 
 ## 18. Sensitivity studies and data requirement (validation split only)
 
@@ -651,11 +651,11 @@ subsets are class-stratified and drawn from the training split only):
 * The SVM is the noisiest with little data: its grid search over C and gamma
   is chosen from 5-fold scores on a few hundred images.
 
-![Data requirement](figures/cnn/data_curve.png)
+![Data requirement](figures/data_curve.png)
 
 | Resolution | CLAHE |
 |---|---|
-| ![CNN resolution](figures/cnn/cnn_resolution.png) | ![CNN and CLAHE](figures/cnn/cnn_clahe.png) |
+| ![CNN resolution](figures/cnn_resolution.png) | ![CNN and CLAHE](figures/cnn_clahe.png) |
 
 ## 19. Classical versus CNN: conclusion
 
