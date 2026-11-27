@@ -376,3 +376,62 @@ def cnn_report_main() -> None:
     out.update(make_study_figures(cfg))
     for k, v in out.items():
         print(f"[fig] {k}: {v}")
+
+
+def prepare_phase4_main() -> None:
+    import sys
+    from pathlib import Path
+
+    from idefect.data.archives import ArchiveError
+    from idefect.data.prepare_phase4 import prepare_dagm, prepare_kolektorsdd
+
+    p = argparse.ArgumentParser(description="Verify the KolektorSDD and DAGM downloads, extract them "
+                                            "safely and check every file against its manifest.")
+    _add_config_arg(p)
+    p.add_argument("--raw", default="data/raw", help="folder holding the downloads (default: data/raw)")
+    p.add_argument("--only", choices=["kolektorsdd", "dagm"], default=None)
+    p.add_argument("--write-manifests", action="store_true",
+                   help="create a missing manifest from the verified archives (first run only)")
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    try:
+        if args.only in (None, "kolektorsdd"):
+            print("[KolektorSDD]")
+            prepare_kolektorsdd(cfg, Path(args.raw), args.write_manifests)
+        if args.only in (None, "dagm"):
+            print("[DAGM 2007]")
+            prepare_dagm(cfg, Path(args.raw), args.write_manifests)
+    except ArchiveError as e:
+        sys.exit(f"STOPPED: {e}")
+    print("All archives and extracted files verified.")
+
+
+def phase4_report_main() -> None:
+    import sys
+
+    from idefect.data.archives import ArchiveError
+    from idefect.data.kolektor import DatasetError
+    from idefect.data.phase4_report import build_phase4_report, problems
+
+    p = argparse.ArgumentParser(description="Phase 4 datasets: integrity, shared-content checks and "
+                                            "leakage-safe splits (KolektorSDD and DAGM 2007).")
+    _add_config_arg(p)
+    p.add_argument("--only", choices=["kolektorsdd", "dagm"], default=None)
+    p.add_argument("--no-figures", action="store_true")
+    args = p.parse_args()
+    cfg = load_config(args.config)
+    try:
+        rep = build_phase4_report(cfg, only=args.only)
+    except (ArchiveError, DatasetError) as e:
+        sys.exit(f"STOPPED: {e}")
+    if not args.no_figures:
+        from idefect.visualization.phase4 import make_phase4_figures
+
+        for k, v in make_phase4_figures(cfg, rep).items():
+            print(f"[fig] {k}: {v}")
+    print(f"[report] {rep['_path']}")
+    issues = problems(rep)
+    for i in issues:
+        print(f"[open] {i}")
+    if not issues:
+        print("No open issues.")

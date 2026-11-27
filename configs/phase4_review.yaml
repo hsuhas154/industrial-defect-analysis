@@ -1,0 +1,34 @@
+# Human decisions for Phase 4 image pairs in the review band of the shared-content
+# check (fine score at or above `review` = 0.3 and below `same` = 0.5), made by
+# looking at each pair side by side (experiments/figures/phase4_dagm_review_pairs.png,
+# drawn from the cached check results). Use full image ids as the report prints them.
+#
+#   same:      pairs to keep on one side of every split
+#   distinct:  pairs that are different images
+#
+# Only review-band pairs can be decided distinct: a pair with identical pixels or
+# a fine score of `same` or more cannot be overruled here (the report stops). A
+# decision for a pair the check no longer flags is reported as stale.
+
+dagm:
+  # Reviewed 2026-11-27, all 9 distinct. Class 4 draws a starburst centred at the
+  # same place in every image and Class 10 a fan of curves rising from the bottom
+  # edge, so pairs align at zero shift and score about 0.3; at native resolution
+  # the individual rays and lines differ. The scores continue smoothly from the
+  # best pairs below 0.3 (0.2997 in Class 4, 0.2963 in Class 10), while planted
+  # re-processed copies score 0.959 or more in both classes.
+  distinct:
+    - [Class4/Train/0601.PNG, Class4/Test/0445.PNG]     # fine 0.3001
+    - [Class4/Test/0191.PNG, Class4/Test/0422.PNG]      # fine 0.3039
+    - [Class10/Train/1252.PNG, Class10/Test/0610.PNG]   # fine 0.3167
+    - [Class10/Train/1541.PNG, Class10/Test/0021.PNG]   # fine 0.3079
+    - [Class10/Train/1658.PNG, Class10/Train/1731.PNG]  # fine 0.3101
+    - [Class10/Train/1675.PNG, Class10/Train/2102.PNG]  # fine 0.3041
+    - [Class10/Train/2164.PNG, Class10/Train/2253.PNG]  # fine 0.3061
+    - [Class10/Train/2181.PNG, Class10/Test/0634.PNG]   # fine 0.3014
+    - [Class10/Test/0282.PNG, Class10/Test/0609.PNG]    # fine 0.3041
+  same: []
+
+kolektorsdd:
+  distinct: []
+  same: []

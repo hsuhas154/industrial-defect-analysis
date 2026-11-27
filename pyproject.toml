@@ -53,6 +53,9 @@ idefect-ablations = "idefect.scripts_entry:ablations_main"
 idefect-classical-report = "idefect.scripts_entry:classical_report_main"
 idefect-epoch-study = "idefect.scripts_entry:epoch_study_main"
 idefect-leakage-study = "idefect.scripts_entry:leakage_study_main"
+idefect-prepare-phase4 = "idefect.scripts_entry:prepare_phase4_main"
+idefect-phase4-report = "idefect.scripts_entry:phase4_report_main"
+idefect-dagm-check = "idefect.data.phase4_dagm_parallel:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -59,6 +59,54 @@ class DataConfig:
 
 
 @dataclass
+class ContentScreenConfig:
+    """Shared-content checks for the Phase 4 datasets (idefect.data.phase4_leakage).
+
+    E1 (pixel identity, any flip, rotation or shift) runs with the NEU
+    settings in data.duplicates, except for the reference-run stride, raised so
+    that memory stays bounded on large images. Re-processed copies are screened by masked
+    NCC of band-passed images: coarse over all pairs, fine for the candidates;
+    the fine score decides. Planted copies prove per dataset (per DAGM class)
+    that a copy would be caught; the run stops otherwise.
+    """
+    exact_stride: int = 6          # E1 reference-run stride (NEU uses 3 on 200 px images)
+    coarse_factor: float = 8.0     # coarse screen: images reduced by this factor
+    fine_factor: float = 2.0       # fine verification of the candidates
+    top_k: int = 10                # candidates: each image's best coarse partners ...
+    candidate_score: float = 0.9   # ... and every pair at or above this coarse score
+    same: float = 0.5              # fine score: same content (grouped)
+    review: float = 0.3            # fine score in [review, same): grouped and shown to a person
+    min_overlap: float = 0.5       # shifts count only with this much overlap
+    planted_sources: int = 40      # images used to plant re-processed copies
+
+
+@dataclass
+class KolektorConfig:
+    """KolektorSDD (fine annotations): pixel masks for defect localization."""
+    root: str = "data/raw/KolektorSDD"       # holds kos01 ... kos50 and splits/
+    manifest: str = "data/kolektorsdd_manifest.sha256"
+    splits_file: str = "data/raw/KolektorSDD/splits/split.pyb"  # official 3-fold split (by part)
+    duplicate_policy: str = "drop_copies"   # drop_copies | keep_together (byte-identical parts)
+    val_parts_frac: float = 0.2             # validation parts carved from each fold's training parts
+    split_seed: int = 42
+    screen: ContentScreenConfig = field(default_factory=lambda: ContentScreenConfig(
+        exact_stride=6, coarse_factor=5.0))
+
+
+@dataclass
+class DAGMConfig:
+    """DAGM 2007: normal versus defective textures with weak ellipse labels."""
+    root: str = "data/raw/DAGM"             # holds Class1 ... Class10
+    manifest: str = "data/dagm_manifest.sha256"
+    classes: List[int] = field(default_factory=lambda: list(range(1, 11)))
+    val_frac: float = 0.2                   # validation images carved from the official Train side
+    split_seed: int = 42
+    screen: ContentScreenConfig = field(default_factory=lambda: ContentScreenConfig(
+        exact_stride=10, coarse_factor=8.0))
+    review_file: str = "configs/phase4_review.yaml"   # human decisions for review-band pairs
+
+
+@dataclass
 class PreprocessingConfig:
     normalize: bool = True
     clahe: bool = True
@@ -159,6 +207,8 @@ class OutputConfig:
 class Config:
     seed: int = 42
     data: DataConfig = field(default_factory=DataConfig)
+    kolektorsdd: KolektorConfig = field(default_factory=KolektorConfig)
+    dagm: DAGMConfig = field(default_factory=DAGMConfig)
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
     hog: HOGConfig = field(default_factory=HOGConfig)
     lbp: LBPConfig = field(default_factory=LBPConfig)
@@ -218,6 +268,19 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "preprocessing.denoise must be one of none|gaussian|median"
         )
+    if cfg.kolektorsdd.duplicate_policy not in {"drop_copies", "keep_together"}:
+        raise ValueError("kolektorsdd.duplicate_policy must be drop_copies or keep_together")
+    for name, frac in (("kolektorsdd.val_parts_frac", cfg.kolektorsdd.val_parts_frac),
+                       ("dagm.val_frac", cfg.dagm.val_frac)):
+        if not 0.0 < frac < 1.0:
+            raise ValueError(f"{name} must be between 0 and 1")
+    for name, sc in (("kolektorsdd.screen", cfg.kolektorsdd.screen), ("dagm.screen", cfg.dagm.screen)):
+        if not 0.0 < sc.review <= sc.same <= 1.0:
+            raise ValueError(f"{name}: need 0 < review <= same <= 1")
+        if sc.exact_stride < 1 or sc.top_k < 1 or sc.coarse_factor < sc.fine_factor:
+            raise ValueError(f"{name}: exact_stride and top_k must be positive, coarse_factor >= fine_factor")
+    if not set(cfg.dagm.classes) <= set(range(1, 11)) or not cfg.dagm.classes:
+        raise ValueError("dagm.classes must be a non-empty subset of 1..10")
     if cfg.preprocessing.enhance not in {"none", "sobel", "tophat"}:
         raise ValueError("preprocessing.enhance must be one of none|sobel|tophat")
     if cfg.cnn.finetune not in {"frozen", "partial", "full"}:

@@ -300,8 +300,14 @@ def _run_hashes(img: np.ndarray, L: int, row_step: int, col_step: int, min_range
     return h[keep], rows * row_step, cols * col_step
 
 
-def exact_overlap_candidates(images: List[np.ndarray], idx: List[int], cfg: DuplicateConfig):
-    """(i, j) -> (k, dy, dx) alignments proposed by matching pixel runs."""
+def _ref_table(images: List[np.ndarray], idx: List[int], cfg: DuplicateConfig):
+    """Hashed pixel runs of every reference image under all 8 transforms.
+
+    Returns (R, uniq, start, counts, meta) or None when nothing usable is left:
+    ``uniq`` are the run hashes seen at most ``max_key_occurrences`` times,
+    ``meta[start[u]:start[u] + counts[u]]`` the (image, transform, row, col)
+    of each occurrence of ``uniq[u]``.
+    """
     L, s = cfg.segment_len, cfg.segment_stride
     R = np.random.default_rng(12345).integers(1, 2**63 - 1, size=L, dtype=np.uint64) | np.uint64(1)
     keys, meta = [], []
@@ -311,34 +317,147 @@ def exact_overlap_candidates(images: List[np.ndarray], idx: List[int], cfg: Dupl
             keys.append(h)
             meta.append(np.stack([np.full_like(r, j), np.full_like(r, k), r, c], 1).astype(np.int32))
     if not keys:
-        return {}
+        return None
     keys = np.concatenate(keys)
     meta = np.concatenate(meta)
     order = np.argsort(keys, kind="stable")
     keys, meta = keys[order], meta[order]
+    del order
     uniq, start, counts = np.unique(keys, return_index=True, return_counts=True)
+    del keys
     ok = counts <= cfg.max_key_occurrences
     uniq, start, counts = uniq[ok], start[ok], counts[ok]
     if len(uniq) == 0:
-        return {}
+        return None
+    return R, uniq, start, counts, meta
 
-    votes: Dict[Tuple[int, int, int, int, int], int] = {}
-    for i in idx:
-        h, r, c = _run_hashes(images[i], L, 1, 1, cfg.min_segment_range, R)
-        pos = np.clip(np.searchsorted(uniq, h), 0, len(uniq) - 1)
-        for t in np.nonzero(uniq[pos] == h)[0]:
-            p = pos[t]
-            for e in range(start[p], start[p] + counts[p]):
-                j, k, rb, cb = meta[e]
-                if j == i:
-                    continue
-                key = (i, int(j), int(k), int(rb - r[t]), int(cb - c[t]))
-                votes[key] = votes.get(key, 0) + 1
-    best: Dict[Tuple[int, int], Tuple[int, int, int, int]] = {}
-    for (i, j, k, dy, dx), v in votes.items():
-        if v >= cfg.min_votes and ((i, j) not in best or v > best[(i, j)][0]):
-            best[(i, j)] = (v, k, dy, dx)
-    return {pair: (k, dy, dx) for pair, (v, k, dy, dx) in best.items()}
+
+def _query_votes(images: List[np.ndarray], i: int, table, cfg: DuplicateConfig) -> List[Tuple]:
+    """[((i, j), (k, dy, dx)), ...] for one query image, in the order the old loop inserted them.
+
+    Votes per alignment (j, k, dy, dx) are counted with np.unique instead of a
+    Python loop. The result, including which alignment wins a tie (the one met
+    first in query-run order, then in reference order) and the order of the
+    pairs, is the same as the loop it replaces (tests/test_content_checks.py
+    compares the two).
+    """
+    R, uniq, start, counts, meta = table
+    off = 1 << 15
+    h, r, c = _run_hashes(images[i], cfg.segment_len, 1, 1, cfg.min_segment_range, R)
+    pos = np.clip(np.searchsorted(uniq, h), 0, len(uniq) - 1)
+    t = np.nonzero(uniq[pos] == h)[0]
+    if t.size == 0:
+        return []
+    reps = counts[pos[t]]
+    first = np.cumsum(reps) - reps
+    e = np.repeat(start[pos[t]], reps) + (np.arange(int(reps.sum())) - np.repeat(first, reps))
+    tt = np.repeat(t, reps)
+    m = meta[e]
+    keep = m[:, 0] != i
+    m, tt = m[keep].astype(np.int64), tt[keep]
+    if m.size == 0:
+        return []
+    dy = m[:, 2] - r[tt]
+    dx = m[:, 3] - c[tt]
+    code = (((m[:, 0] << 3 | m[:, 1]) << 16 | (dy + off)) << 16) | (dx + off)
+    keys_u, first_at, n = np.unique(code, return_index=True, return_counts=True)
+    q = n >= cfg.min_votes
+    if not q.any():
+        return []
+    keys_u, first_at, n = keys_u[q], first_at[q], n[q]
+    j = keys_u >> 35
+    # per partner j: most votes, then earliest first appearance
+    order = np.lexsort((first_at, -n, j))
+    j_sorted = j[order]
+    lead = order[np.r_[True, j_sorted[1:] != j_sorted[:-1]]]
+    # pairs in the order the loop version inserted them: the earliest
+    # qualifying alignment of each partner
+    earliest = {}
+    for jj, fa in zip(j.tolist(), first_at.tolist()):
+        if jj not in earliest or fa < earliest[jj]:
+            earliest[jj] = fa
+    win = {int(j[x]): x for x in lead}
+    out = []
+    for jj in sorted(earliest, key=earliest.get):
+        kc = int(keys_u[win[jj]])
+        out.append(((i, jj), ((kc >> 32) & 7, ((kc >> 16) & 0xFFFF) - off, (kc & 0xFFFF) - off)))
+    return out
+
+
+# Shared with forked helper processes: set just before the pool starts, read by
+# _votes_chunk in the children (copy-on-write, so the table is never copied).
+_E1_SHARED = None
+
+
+def _votes_chunk(chunk: List[int]) -> List[Tuple]:
+    images, table, cfg = _E1_SHARED
+    out = []
+    for i in chunk:
+        out.extend(_query_votes(images, i, table, cfg))
+    return out
+
+
+def _helper_init() -> None:
+    """In each helper: die with the parent process, leave Ctrl+C to the parent."""
+    import signal
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except OSError:
+        pass
+
+
+def exact_overlap_candidates(images: List[np.ndarray], idx: List[int], cfg: DuplicateConfig,
+                             workers: int = 1, progress=None, chunk: int = 8):
+    """(i, j) -> (k, dy, dx) alignments proposed by matching pixel runs.
+
+    ``workers`` > 1 splits the query images over that many forked processes
+    that share the reference table; results are merged in query order, so the
+    returned dict (content and order) is the same for any ``workers``.
+    ``progress(done, total)`` is called after each chunk of query images.
+    """
+    table = _ref_table(images, idx, cfg)
+    if table is None:
+        return {}
+    chunks = [idx[a:a + chunk] for a in range(0, len(idx), chunk)]
+    best: Dict[Tuple[int, int], Tuple[int, int, int]] = {}
+    done = 0
+
+    def merge(ch, res):
+        nonlocal done
+        for key, val in res:
+            best[key] = val
+        done += len(ch)
+        if progress is not None:
+            progress(done, len(idx))
+
+    if workers <= 1 or len(chunks) < 2:
+        for ch in chunks:
+            merge(ch, [kv for i in ch for kv in _query_votes(images, i, table, cfg)])
+        return best
+    import gc
+    import multiprocessing as mp
+    import warnings
+    from concurrent.futures import ProcessPoolExecutor
+
+    global _E1_SHARED
+    _E1_SHARED = (images, table, cfg)
+    gc.freeze()   # keep the garbage collector from touching (and so copying) shared pages
+    try:
+        with warnings.catch_warnings():
+            # The helpers only run numpy on data that exists before the fork.
+            warnings.filterwarnings("ignore", message=".*use of fork\\(\\) may lead to deadlocks.*")
+            with ProcessPoolExecutor(min(workers, len(chunks)), mp_context=mp.get_context("fork"),
+                                     initializer=_helper_init) as ex:
+                for ch, res in zip(chunks, ex.map(_votes_chunk, chunks)):
+                    merge(ch, res)
+    finally:
+        _E1_SHARED = None
+        gc.unfreeze()
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -651,6 +770,70 @@ def detect_duplicates(paths: Sequence[str], cfg: DuplicateConfig | None = None,
         with open(cache_file, "w") as fh:
             json.dump({"pairs": [asdict(p) for p in pairs], "n_candidates": n_cand}, fh)
     return _finalize(paths, pairs, n_cand, cfg, review)
+
+
+def _textured(v: np.ndarray, min_range: int) -> np.ndarray:
+    """Pixels whose 3x3 neighbourhood spans at least ``min_range`` grey levels."""
+    k = np.ones((3, 3), np.uint8)
+    return (cv2.dilate(v, k).astype(np.int16) - cv2.erode(v, k).astype(np.int16)) >= min_range
+
+
+def exact_overlap_pairs(images: Sequence[np.ndarray], cfg: DuplicateConfig | None = None,
+                        verbose: bool = False, workers: int = 1, progress=None) -> List[Dict]:
+    """E1 only, for images of any shape: identical pixels and pixel-identical overlaps.
+
+    Every alignment proposed by the pixel-run vote is verified at native
+    resolution (with the same +-1 pixel refinement as ``detect_duplicates``).
+    On top of the E1 rule, at least ``min_exact_overlap_px`` of the overlap must
+    be textured (3x3 range of ``min_segment_range`` grey levels or more) and
+    those pixels must agree too, so two flat or black areas can never pass as
+    shared content. Returns one dict per pair (i < j) that passes.
+    ``workers`` and ``progress`` go to ``exact_overlap_candidates`` (the
+    result does not depend on ``workers``).
+    """
+    cfg = cfg or DuplicateConfig()
+    out: Dict[Tuple[int, int], Dict] = {}
+    by_hash: Dict[str, List[int]] = {}
+    for i, im in enumerate(images):
+        by_hash.setdefault(pixel_hash(im), []).append(i)
+    for idx in by_hash.values():
+        for x in idx[1:]:
+            out[(idx[0], x)] = {"a": idx[0], "b": x, "evidence": "identical-pixels",
+                                "transform": "identity", "shift": (0, 0), "exact_fraction": 1.0,
+                                "overlap_px": int(images[x].size), "textured_px": None,
+                                "textured_fraction": 1.0}
+    ex = exact_overlap_candidates(list(images), list(range(len(images))), cfg, workers, progress)
+    if verbose:
+        print(f"[exact] pixel-run voting proposed {len(ex)} alignments")
+    for (i, j), (k, dy, dx) in ex.items():
+        a, b = sorted((i, j))
+        if (a, b) in out:
+            continue
+        bt = dihedral(images[j], k)
+        best = None
+        for ddy in (-1, 0, 1):
+            for ddx in (-1, 0, 1):
+                va, vb = overlap_views(images[i], bt, dy + ddy, dx + ddx)
+                if va.size < cfg.min_exact_overlap_px:
+                    continue
+                frac = exact_agreement(va, vb, cfg.exact_tolerance)
+                if frac < cfg.exact_fraction:
+                    continue
+                tex = _textured(va, cfg.min_segment_range) | _textured(vb, cfg.min_segment_range)
+                n_tex = int(tex.sum())
+                if n_tex < cfg.min_exact_overlap_px:
+                    continue
+                tfrac = exact_agreement(va[tex], vb[tex], cfg.exact_tolerance)
+                if tfrac < cfg.exact_fraction:
+                    continue
+                if best is None or frac > best["exact_fraction"]:
+                    best = {"a": i, "b": j, "evidence": "pixel-identical",
+                            "transform": DIHEDRAL_NAMES[k], "shift": (dy + ddy, dx + ddx),
+                            "exact_fraction": round(frac, 4), "overlap_px": int(va.size),
+                            "textured_px": n_tex, "textured_fraction": round(tfrac, 4)}
+        if best is not None:
+            out[(a, b)] = best
+    return [out[k] for k in sorted(out)]
 
 
 def _finalize(paths, pairs: List[PairResult], n_candidates: int, cfg: DuplicateConfig,

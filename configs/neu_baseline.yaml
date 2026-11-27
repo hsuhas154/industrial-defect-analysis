@@ -36,6 +36,44 @@ data:
     review_file: "configs/duplicate_review.yaml"
     cache_dir: "experiments/cache"
 
+# Phase 4 datasets (data/README.md explains the downloads; scripts/prepare_phase4_data.py
+# verifies the archives, extracts them and builds the integrity manifests).
+kolektorsdd:
+  root: "data/raw/KolektorSDD"
+  manifest: "data/kolektorsdd_manifest.sha256"
+  splits_file: "data/raw/KolektorSDD/splits/split.pyb"   # official 3-fold split by part
+  duplicate_policy: "drop_copies"   # kos26 and kos34 are byte-identical copies of kos01 and kos27
+  val_parts_frac: 0.2      # validation parts carved from each fold's training parts
+  split_seed: 42
+  screen:                  # shared-content checks (src/idefect/data/phase4_leakage.py)
+    exact_stride: 6        # pixel identity: reference-run stride
+    coarse_factor: 5.0     # coarse NCC screen on images reduced 5x (100 x ~250 px)
+    fine_factor: 2.0       # fine verification of the candidates; this score decides
+    top_k: 10
+    candidate_score: 0.9
+    same: 0.5
+    review: 0.3
+    min_overlap: 0.5
+    planted_sources: 40
+
+dagm:
+  root: "data/raw/DAGM"
+  manifest: "data/dagm_manifest.sha256"
+  classes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  val_frac: 0.2            # validation images carved from the official Train side
+  split_seed: 42
+  review_file: "configs/phase4_review.yaml"   # human decisions for pairs in the review band
+  screen:
+    exact_stride: 10       # 512 x 512 images, up to 2,300 per class: keeps memory near 6 GB
+    coarse_factor: 8.0     # 64 x 64 coarse screen
+    fine_factor: 2.0
+    top_k: 10
+    candidate_score: 0.9
+    same: 0.5
+    review: 0.3
+    min_overlap: 0.5
+    planted_sources: 40
+
 preprocessing:
   normalize: true          # scale pixel intensities to [0, 1]
   clahe: true              # contrast-limited adaptive histogram equalisation

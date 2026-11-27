@@ -159,10 +159,14 @@ industrial-defect-analysis/
 ├── requirements.txt
 ├── configs/
 │   ├── neu_baseline.yaml       # single source of truth for every run
-│   └── duplicate_review.yaml   # human decisions on borderline near-duplicates
+│   ├── duplicate_review.yaml   # human decisions on borderline near-duplicates (NEU)
+│   └── phase4_review.yaml      # human decisions on borderline pairs (KolektorSDD, DAGM)
 ├── data/
-│   ├── README.md               # how to obtain NEU (images are not committed)
-│   └── neu_cls_manifest.sha256 # SHA-256 of every NEU image (integrity check)
+│   ├── README.md               # how to obtain every dataset (images are not committed)
+│   ├── neu_cls_manifest.sha256 # SHA-256 of every NEU image (integrity check)
+│   ├── phase4_archives.sha256  # SHA-256 of the KolektorSDD and DAGM downloads
+│   ├── kolektorsdd_manifest.sha256, dagm_manifest.sha256
+│   └── splits/                 # leakage-safe KolektorSDD folds and DAGM split
 ├── src/idefect/
 │   ├── config.py               # typed YAML config with validation
 │   ├── seed.py                 # reproducibility
@@ -219,6 +223,15 @@ Download **NEU-CLS** from the official page
 (`Cr_1.bmp`, `In_1.bmp`, ...) and class sub-folders are detected automatically.
 Full instructions, checksums and licensing notes are in
 [`data/README.md`](data/README.md).
+
+Phase 4 adds **KolektorSDD** and **DAGM 2007**. After downloading the archives
+(see `data/README.md`), verify, extract and split them:
+
+```bash
+python scripts/prepare_phase4_data.py      # checksums, safe extraction, manifests
+python scripts/phase4_dagm_check.py        # DAGM shared-content checks, many classes at once
+python scripts/phase4_dataset_report.py    # shared-content checks, leakage-safe splits
+```
 
 No dataset yet? A synthetic stand-in exercises the whole pipeline (its numbers
 are meaningless and must not be reported):
@@ -294,6 +307,14 @@ it is stored with every result.
 * Near-duplicates (identical files, flipped or rotated copies, overlapping
   crops, re-processed copies) are grouped and every group stays inside one
   split; cross-validation folds respect the same groups.
+* KolektorSDD's official 3-fold split leaks in every fold (two parts are
+  byte-identical copies of two others and one commutator was captured twice
+  under two part numbers); Phase 4 uses corrected folds. See
+  `docs/dataset_notes.md`.
+* DAGM 2007 was screened pair by pair within each class (14.5 million pairs):
+  no shared content; nine borderline pairs were checked by eye and recorded in
+  `configs/phase4_review.yaml`. Validation images come from the official
+  Train side only.
 * Everything learned from data (scalers, classifiers, CNN weights) is fitted
   on training images only; hyperparameters, feature sets and training length
   are chosen by cross-validation or on the validation split, never on test.
@@ -323,7 +344,18 @@ training images only. For Phase 3 it checks every CNN architecture's output
 shape and training through the real trainer, that frozen layers really stay
 frozen (BatchNorm statistics included), Grad-CAM on a model whose evidence is
 known, the efficiency benchmark, that the CNN studies never touch the test
-split, and the app's Grad-CAM view.
+split, and the app's Grad-CAM view. For Phase 4 it checks that the archive
+extractor refuses unsafe or altered input (path traversal, symlinks, edited
+files, corrupt members), that the split-file decoder refuses any pickle that
+could run code, the strict KolektorSDD and DAGM loaders (palette masks, label
+files), that corrected KolektorSDD folds never split related parts, the DAGM
+validation split (disjoint, stratified, deterministic, groups kept whole),
+the masked-correlation screen against brute force, the vectorized
+pixel-run vote against the original loop, that the parallel DAGM check gives
+the same result as the serial path (E1 split over processes, progress hooks,
+atomic cache writes), the shared memory ledger (budget, first come first
+served, no deadlock, dead holders dropped) and the rules for human review
+decisions.
 
 ## Roadmap
 
@@ -332,7 +364,7 @@ split, and the app's Grad-CAM view.
 | 1 | NEU baseline: data audit, preprocessing, HOG + DT / SVM, custom CNN, evaluation, error analysis, demo | done |
 | 2 | Leakage control (near-duplicates), classical branch: LBP and GLCM, Random Forest, XGBoost, logistic regression, k-NN, grouped CV tuning, ablations | done |
 | 3 | CNN study: VGG-style, ResNet, DenseNet, MobileNet, transfer learning, efficiency benchmarks, Grad-CAM | done |
-| 4 | U-Net defect localization (KolektorSDD), DAGM generalization, FastAPI, Docker, technical report | planned |
+| 4 | U-Net defect localization (KolektorSDD), DAGM generalization, FastAPI, Docker, technical report | in progress (datasets and leakage-safe splits done) |
 
 See [`docs/methodology.md`](docs/methodology.md) for the design rationale and
 [`docs/experiments.md`](docs/experiments.md) for detailed results.
